@@ -1,0 +1,835 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>マックスの健康日記 🐾</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- FontAwesome -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Chart.js & DataLabels Plugin -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2"></script>
+
+    <!-- ES ModuleとしてVueとFirebaseを統括読み込み -->
+    <script type="module">
+        import { createApp, ref, computed, watch, nextTick, onMounted } from "https://unpkg.com/vue@3/dist/vue.esm-browser.js";
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, addDoc, deleteDoc, doc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Chart.js Datalabels プラグインの登録
+        Chart.register(ChartDataLabels);
+
+        // Firebase初期化（本番環境設定を適用）
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {
+            apiKey: "AIzaSyAwhsXGF-wOUwYxDdNI0t4_YDdkmQ4l7Z4",
+            authDomain: "maxrecord.firebaseapp.com",
+            projectId: "maxrecord",
+            storageBucket: "maxrecord.firebasestorage.app",
+            messagingSenderId: "942829666898",
+            appId: "1:942829666898:web:7cda1423301e3ab35c158b"
+        };
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-cat-app';
+
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+
+        const WEEKDAYS = ['日', '月', '火', '水', '木', '金', '土'];
+
+        createApp({
+            setup() {
+                const logs = ref([]);
+                const currentTab = ref('input');
+                const activeCategory = ref(null);
+                const isOnline = ref(false);
+                const isSaving = ref(false);
+                const currentUser = ref(null);
+
+                // BIツール用：指定日の日付（デフォルトは昨日）
+                const getYesterdayISO = () => {
+                    const d = new Date();
+                    d.setDate(d.getDate() - 1);
+                    const year = d.getFullYear();
+                    const month = String(d.getMonth() + 1).padStart(2, '0');
+                    const day = String(d.getDate()).padStart(2, '0');
+                    return `${year}-${month}-${day}`;
+                };
+                const selectedBiDate = ref(getYesterdayISO());
+
+                let foodChartInstance = null;
+                let waterChartInstance = null;
+                let toiletChartInstance = null;
+                let symptomChartInstance = null;
+                let unsubscribeFirestore = null;
+
+                const form = ref({
+                    timestamp: '',
+                    food: { type: 'ドライ', amount: '普通', note: '' },
+                    water: { amount: '普通', note: '' },
+                    toilet: { type: 'おしっこ', amount: '普通', note: '' },
+                    symptom: { symptomType: '嘔吐（毛玉）', description: '' }
+                });
+
+                const todayStr = computed(() => {
+                    const now = new Date();
+                    const dayOfWeek = WEEKDAYS[now.getDay()];
+                    return `${now.getFullYear()}/${now.getMonth() + 1}/${now.getDate()}(${dayOfWeek})`;
+                });
+
+                // 認証・接続処理
+                onMounted(async () => {
+                    try {
+                        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                            await signInWithCustomToken(auth, __initial_auth_token);
+                        } else {
+                            await signInAnonymously(auth);
+                        }
+                    } catch (e) {
+                        console.error("認証エラー:", e);
+                    }
+
+                    onAuthStateChanged(auth, (user) => {
+                        currentUser.value = user;
+                        if (user) {
+                            isOnline.value = true;
+                            listenToFirestore();
+                        } else {
+                            isOnline.value = false;
+                        }
+                    });
+                });
+
+                // リアルタイム同期リスナー
+                const listenToFirestore = () => {
+                    if (!currentUser.value) return;
+
+                    if (unsubscribeFirestore) unsubscribeFirestore();
+
+                    const colRef = collection(db, 'artifacts', appId, 'public', 'data', 'cat_logs');
+
+                    unsubscribeFirestore = onSnapshot(colRef, (snapshot) => {
+                        const fetchedLogs = [];
+                        snapshot.forEach((docSnap) => {
+                            fetchedLogs.push({ id: docSnap.id, ...docSnap.data() });
+                        });
+
+                        fetchedLogs.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+                        logs.value = fetchedLogs;
+                    }, (err) => {
+                        console.error("データ取得エラー:", err);
+                        isOnline.value = false;
+                    });
+                };
+
+                const getCurrentDateTimeString = () => {
+                    const now = new Date();
+                    const year = now.getFullYear();
+                    const month = String(now.getMonth() + 1).padStart(2, '0');
+                    const day = String(now.getDate()).padStart(2, '0');
+                    const hours = String(now.getHours()).padStart(2, '0');
+                    const minutes = String(now.getMinutes()).padStart(2, '0');
+                    return `${year}-${month}-${day}T${hours}:${minutes}`;
+                };
+
+                const openModal = (category) => {
+                    activeCategory.value = category;
+                    form.value.timestamp = getCurrentDateTimeString();
+                };
+
+                const closeModal = () => {
+                    if (isSaving.value) return;
+                    activeCategory.value = null;
+                };
+
+                // ログ保存処理
+                const saveLog = async () => {
+                    if (!currentUser.value) {
+                        alert("サーバー接続中です。しばらく待ってから再度お試しください。");
+                        return;
+                    }
+
+                    isSaving.value = true;
+
+                    let title = '';
+                    let details = {};
+
+                    if (activeCategory.value === 'food') {
+                        title = 'ごはん';
+                        details = { ...form.value.food };
+                    } else if (activeCategory.value === 'water') {
+                        title = '水';
+                        details = { ...form.value.water };
+                    } else if (activeCategory.value === 'toilet') {
+                        title = 'トイレ';
+                        details = { ...form.value.toilet };
+                    } else if (activeCategory.value === 'symptom') {
+                        title = '症状・異変';
+                        details = { ...form.value.symptom };
+                    }
+
+                    const newLog = {
+                        category: activeCategory.value,
+                        title: title,
+                        timestamp: form.value.timestamp,
+                        details: details,
+                        createdAt: new Date().toISOString()
+                    };
+
+                    try {
+                        const colRef = collection(db, 'artifacts', appId, 'public', 'data', 'cat_logs');
+                        await addDoc(colRef, newLog);
+                        
+                        form.value.food.note = '';
+                        form.value.water.note = '';
+                        form.value.toilet.note = '';
+                        form.value.symptom.description = '';
+                        activeCategory.value = null;
+                    } catch (e) {
+                        console.error("保存失敗:", e);
+                        alert("データの保存に失敗しました。通信環境を確認してください。");
+                    } finally {
+                        isSaving.value = false;
+                    }
+                };
+
+                // ログ削除処理
+                const deleteLog = async (id) => {
+                    if (!confirm('この記録を削除しますか？（共有相手の画面からも消去されます）')) return;
+
+                    try {
+                        const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'cat_logs', id);
+                        await deleteDoc(docRef);
+                    } catch (e) {
+                        console.error("削除失敗:", e);
+                        alert("削除に失敗しました。");
+                    }
+                };
+
+                const exportCSV = () => {
+                    if (logs.value.length === 0) return;
+                    const headers = ["日時", "カテゴリー", "項目名", "種類/分類", "量", "詳細/備考"];
+                    const rows = logs.value.map(log => [
+                        `"${log.timestamp ? log.timestamp.replace('T', ' ') : ''}"`,
+                        `"${log.category || ''}"`,
+                        `"${log.title || ''}"`,
+                        `"${log.details?.type || log.details?.symptomType || ''}"`,
+                        `"${log.details?.amount || ''}"`,
+                        `"${(log.details?.note || log.details?.description || '').replace(/"/g, '""')}"`
+                    ]);
+                    const csvContent = [headers.join(","), ...rows.map(e => e.join(","))].join("\n");
+                    const blob = new Blob(["\uFEFF" + csvContent], { type: 'text/csv;charset=utf-8;' });
+                    const url = URL.createObjectURL(blob);
+                    const link = document.createElement("a");
+                    link.href = url;
+                    link.download = `max_logs_${new Date().toISOString().slice(0,10)}.csv`;
+                    link.click();
+                };
+
+                const exportJSON = () => {
+                    if (logs.value.length === 0) return;
+                    const blob = new Blob([JSON.stringify(logs.value, null, 2)], { type: 'application/json' });
+                    const url = URL.createObjectURL(blob);
+                    const link = document.createElement("a");
+                    link.href = url;
+                    link.download = `max_logs_${new Date().toISOString().slice(0,10)}.json`;
+                    link.click();
+                };
+
+                const todaySummary = computed(() => {
+                    const today = new Date().toDateString();
+                    const todayLogs = logs.value.filter(log => new Date(log.timestamp).toDateString() === today);
+                    return {
+                        food: todayLogs.filter(l => l.category === 'food').length,
+                        water: todayLogs.filter(l => l.category === 'water').length,
+                        toilet: todayLogs.filter(l => l.category === 'toilet').length,
+                        symptom: todayLogs.filter(l => l.category === 'symptom').length,
+                    };
+                });
+
+                // BIツール冒頭：選択した日付の詳細内訳データ
+                const selectedBiDetails = computed(() => {
+                    if (!selectedBiDate.value) {
+                        return { food: { total: 0, types: {} }, water: { total: 0 }, toilet: { total: 0, types: {} }, symptom: { total: 0, types: {} } };
+                    }
+                    const targetLogs = logs.value.filter(log => log.timestamp && log.timestamp.startsWith(selectedBiDate.value));
+
+                    const foodLogs = targetLogs.filter(l => l.category === 'food');
+                    const foodTypes = { 'ドライ': 0, 'ウェット': 0, '水分サプリ': 0, 'おやつ': 0 };
+                    foodLogs.forEach(l => { if (l.details?.type && foodTypes[l.details.type] !== undefined) foodTypes[l.details.type]++; });
+
+                    const waterLogs = targetLogs.filter(l => l.category === 'water');
+
+                    const toiletLogs = targetLogs.filter(l => l.category === 'toilet');
+                    const toiletTypes = { 'おしっこ': 0, 'うんこ': 0, '両方': 0 };
+                    toiletLogs.forEach(l => { if (l.details?.type && toiletTypes[l.details.type] !== undefined) toiletTypes[l.details.type]++; });
+
+                    const symptomLogs = targetLogs.filter(l => l.category === 'symptom');
+                    const symptomTypes = { '嘔吐（ごはん）': 0, '嘔吐（毛玉）': 0, '嘔吐（胃液）': 0, 'その他': 0 };
+                    symptomLogs.forEach(l => { if (l.details?.symptomType && symptomTypes[l.details.symptomType] !== undefined) symptomTypes[l.details.symptomType]++; });
+
+                    return {
+                        food: { total: foodLogs.length, types: foodTypes },
+                        water: { total: waterLogs.length },
+                        toilet: { total: toiletLogs.length, types: toiletTypes },
+                        symptom: { total: symptomLogs.length, types: symptomTypes }
+                    };
+                });
+
+                // 常に直近7日間の日付配列（YYYY-MM-DD）を取得
+                const getLast7Days = () => {
+                    const dates = [];
+                    const now = new Date();
+                    for (let i = 6; i >= 0; i--) {
+                        const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - i);
+                        const year = d.getFullYear();
+                        const month = String(d.getMonth() + 1).padStart(2, '0');
+                        const day = String(d.getDate()).padStart(2, '0');
+                        dates.push(`${year}-${month}-${day}`);
+                    }
+                    return dates;
+                };
+
+                const formatDateWithDay = (dateStr) => {
+                    const d = new Date(dateStr);
+                    if (isNaN(d.getTime())) return dateStr;
+                    const month = d.getMonth() + 1;
+                    const day = d.getDate();
+                    const dayOfWeek = WEEKDAYS[d.getDay()];
+                    return `${month}/${day}(${dayOfWeek})`;
+                };
+
+                const commonChartOptions = (isStacked = true) => ({
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { position: 'top', labels: { boxWidth: 10, font: { size: 10 } } },
+                        datalabels: {
+                            display: (context) => context.dataset.data[context.dataIndex] > 0,
+                            color: '#ffffff',
+                            font: { weight: 'bold', size: 10 },
+                            formatter: (value) => value
+                        }
+                    },
+                    scales: {
+                        x: { stacked: isStacked, grid: { display: false } },
+                        y: { stacked: isStacked, beginAtZero: true, ticks: { precision: 0 } }
+                    }
+                });
+
+                const renderCharts = () => {
+                    if (currentTab.value !== 'bi') return;
+
+                    if (foodChartInstance) foodChartInstance.destroy();
+                    if (waterChartInstance) waterChartInstance.destroy();
+                    if (toiletChartInstance) toiletChartInstance.destroy();
+                    if (symptomChartInstance) symptomChartInstance.destroy();
+
+                    // 常に過去7日の日付を取得
+                    const sortedDates = getLast7Days();
+                    const formattedLabels = sortedDates.map(d => formatDateWithDay(d));
+
+                    // 1. ごはん（積み上げ）
+                    const foodTypes = ['ドライ', 'ウェット', '水分サプリ', 'おやつ'];
+                    const foodColors = ['#d97706', '#e11d48', '#0284c7', '#10b981'];
+                    const foodDatasets = foodTypes.map((type, idx) => ({
+                        label: type,
+                        backgroundColor: foodColors[idx],
+                        data: sortedDates.map(d => logs.value.filter(l => l.category === 'food' && l.timestamp && l.timestamp.startsWith(d) && l.details?.type === type).length)
+                    }));
+
+                    const ctxFood = document.getElementById('foodChart')?.getContext('2d');
+                    if (ctxFood) {
+                        foodChartInstance = new Chart(ctxFood, {
+                            type: 'bar',
+                            data: { labels: formattedLabels, datasets: foodDatasets },
+                            options: commonChartOptions(true)
+                        });
+                    }
+
+                    // 2. 水（単体）
+                    const waterDataset = [{
+                        label: '水 (回)',
+                        backgroundColor: '#06b6d4',
+                        data: sortedDates.map(d => logs.value.filter(l => l.category === 'water' && l.timestamp && l.timestamp.startsWith(d)).length)
+                    }];
+
+                    const ctxWater = document.getElementById('waterChart')?.getContext('2d');
+                    if (ctxWater) {
+                        waterChartInstance = new Chart(ctxWater, {
+                            type: 'bar',
+                            data: { labels: formattedLabels, datasets: waterDataset },
+                            options: commonChartOptions(false)
+                        });
+                    }
+
+                    // 3. トイレ（積み上げ）
+                    const toiletTypes = ['おしっこ', 'うんこ', '両方'];
+                    const toiletColors = ['#3b82f6', '#d97706', '#10b981'];
+                    const toiletDatasets = toiletTypes.map((type, idx) => ({
+                        label: type,
+                        backgroundColor: toiletColors[idx],
+                        data: sortedDates.map(d => logs.value.filter(l => l.category === 'toilet' && l.timestamp && l.timestamp.startsWith(d) && l.details?.type === type).length)
+                    }));
+
+                    const ctxToilet = document.getElementById('toiletChart')?.getContext('2d');
+                    if (ctxToilet) {
+                        toiletChartInstance = new Chart(ctxToilet, {
+                            type: 'bar',
+                            data: { labels: formattedLabels, datasets: toiletDatasets },
+                            options: commonChartOptions(true)
+                        });
+                    }
+
+                    // 4. 症状（積み上げ）
+                    const symptomTypes = ['嘔吐（ごはん）', '嘔吐（毛玉）', '嘔吐（胃液）', 'その他'];
+                    const symptomColors = ['#e11d48', '#f97316', '#8b5cf6', '#64748b'];
+                    const symptomDatasets = symptomTypes.map((type, idx) => ({
+                        label: type,
+                        backgroundColor: symptomColors[idx],
+                        data: sortedDates.map(d => logs.value.filter(l => l.category === 'symptom' && l.timestamp && l.timestamp.startsWith(d) && l.details?.symptomType === type).length)
+                    }));
+
+                    const ctxSymptom = document.getElementById('symptomChart')?.getContext('2d');
+                    if (ctxSymptom) {
+                        symptomChartInstance = new Chart(ctxSymptom, {
+                            type: 'bar',
+                            data: { labels: formattedLabels, datasets: symptomDatasets },
+                            options: commonChartOptions(true)
+                        });
+                    }
+                };
+
+                watch([currentTab, logs], () => {
+                    if (currentTab.value === 'bi') nextTick(renderCharts);
+                }, { deep: true });
+
+                const formatTime = (ts) => {
+                    if (!ts) return '';
+                    const d = new Date(ts);
+                    if (isNaN(d.getTime())) return '';
+                    const month = d.getMonth() + 1;
+                    const day = d.getDate();
+                    const dayOfWeek = WEEKDAYS[d.getDay()];
+                    const hours = String(d.getHours()).padStart(2, '0');
+                    const minutes = String(d.getMinutes()).padStart(2, '0');
+                    return `${month}/${day}(${dayOfWeek}) ${hours}:${minutes}`;
+                };
+
+                const formatDateLabel = (dateStr) => {
+                    if (!dateStr) return '';
+                    const d = new Date(dateStr);
+                    if (isNaN(d.getTime())) return dateStr;
+                    return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日(${WEEKDAYS[d.getDay()]})`;
+                };
+
+                return {
+                    logs, currentTab, activeCategory, form, todayStr, selectedBiDate, selectedBiDetails,
+                    isOnline, isSaving, openModal, closeModal, saveLog, deleteLog,
+                    exportCSV, exportJSON, todaySummary, formatTime, formatDateLabel
+                };
+            }
+        }).mount('#app');
+    </script>
+</head>
+<body class="bg-slate-50 min-h-screen text-slate-800 pb-16">
+    <div id="app" class="max-w-md mx-auto px-4 py-6">
+        <!-- ヘッダー -->
+        <header class="text-center mb-4">
+            <h1 class="text-2xl font-bold text-amber-800 flex items-center justify-center gap-2">
+                <i class="fa-solid fa-paw text-amber-600"></i> マックスの健康日記 🐾
+            </h1>
+            <div class="flex items-center justify-center gap-2 mt-1">
+                <p class="text-xs text-slate-500">日々の記録 ＆ ヘルスケア分析</p>
+                <span class="text-[10px] px-2 py-0.5 rounded-full font-bold transition" :class="isOnline ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'">
+                    <i class="fa-solid fa-arrows-rotate mr-0.5" :class="{'fa-spin': isOnline}"></i>
+                    {{ isOnline ? 'リアルタイム同期中' : '接続中...' }}
+                </span>
+            </div>
+        </header>
+
+        <!-- タブ切り替え -->
+        <div class="flex bg-slate-200/80 p-1 rounded-2xl mb-6 shadow-inner">
+            <button @click="currentTab = 'input'" 
+                class="flex-1 py-2 text-xs font-bold rounded-xl transition flex items-center justify-center gap-1"
+                :class="currentTab === 'input' ? 'bg-white text-amber-800 shadow-sm' : 'text-slate-600 hover:text-slate-800'">
+                <i class="fa-solid fa-pen-to-square"></i> 記録・履歴
+            </button>
+            <button @click="currentTab = 'bi'" 
+                class="flex-1 py-2 text-xs font-bold rounded-xl transition flex items-center justify-center gap-1"
+                :class="currentTab === 'bi' ? 'bg-white text-amber-800 shadow-sm' : 'text-slate-600 hover:text-slate-800'">
+                <i class="fa-solid fa-chart-pie"></i> BIダッシュボード
+            </button>
+        </div>
+
+        <!-- ================= タブ1: 記録・履歴 ================= -->
+        <div v-show="currentTab === 'input'">
+            <!-- クイック記録ボタン -->
+            <div class="grid grid-cols-4 gap-2 mb-6">
+                <button @click="openModal('food')" class="bg-white border-2 border-orange-200 hover:border-orange-400 p-2.5 rounded-2xl shadow-sm flex flex-col items-center justify-center transition active:scale-95">
+                    <span class="text-2xl mb-1">🍚</span>
+                    <span class="text-[11px] font-bold text-slate-700">ごはん</span>
+                </button>
+                <button @click="openModal('water')" class="bg-white border-2 border-cyan-200 hover:border-cyan-400 p-2.5 rounded-2xl shadow-sm flex flex-col items-center justify-center transition active:scale-95">
+                    <span class="text-2xl mb-1">💧</span>
+                    <span class="text-[11px] font-bold text-slate-700">水</span>
+                </button>
+                <button @click="openModal('toilet')" class="bg-white border-2 border-amber-200 hover:border-amber-400 p-2.5 rounded-2xl shadow-sm flex flex-col items-center justify-center transition active:scale-95">
+                    <span class="text-2xl mb-1">🚽</span>
+                    <span class="text-[11px] font-bold text-slate-700">トイレ</span>
+                </button>
+                <button @click="openModal('symptom')" class="bg-white border-2 border-rose-200 hover:border-rose-400 p-2.5 rounded-2xl shadow-sm flex flex-col items-center justify-center transition active:scale-95">
+                    <span class="text-2xl mb-1">⚠️</span>
+                    <span class="text-[11px] font-bold text-slate-700">症状</span>
+                </button>
+            </div>
+
+            <!-- 本日のサマリー -->
+            <section class="bg-amber-100/60 rounded-2xl p-3.5 mb-6 text-amber-900 border border-amber-200/50">
+                <h2 class="text-xs font-bold uppercase tracking-wider text-amber-700 mb-2">今日の記録まとめ ({{ todayStr }})</h2>
+                <div class="grid grid-cols-4 gap-1.5 text-center text-xs">
+                    <div class="bg-white/80 rounded-lg p-1.5">
+                        <span class="block text-slate-500 text-[10px]">ごはん</span>
+                        <span class="text-sm font-bold text-orange-600">{{ todaySummary.food }} 回</span>
+                    </div>
+                    <div class="bg-white/80 rounded-lg p-1.5">
+                        <span class="block text-slate-500 text-[10px]">水</span>
+                        <span class="text-sm font-bold text-cyan-600">{{ todaySummary.water }} 回</span>
+                    </div>
+                    <div class="bg-white/80 rounded-lg p-1.5">
+                        <span class="block text-slate-500 text-[10px]">トイレ</span>
+                        <span class="text-sm font-bold text-amber-600">{{ todaySummary.toilet }} 回</span>
+                    </div>
+                    <div class="bg-white/80 rounded-lg p-1.5">
+                        <span class="block text-slate-500 text-[10px]">症状</span>
+                        <span class="text-sm font-bold text-rose-600">{{ todaySummary.symptom }} 件</span>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 記録タイムライン -->
+            <section>
+                <div class="flex justify-between items-center mb-3">
+                    <h2 class="font-bold text-slate-700 flex items-center gap-1 text-sm">
+                        <i class="fa-solid fa-clock-rotate-left text-amber-600"></i> 履歴ログ
+                    </h2>
+                    <div v-if="logs.length > 0" class="flex items-center gap-2 text-xs">
+                        <button @click="exportCSV" class="text-amber-700 bg-amber-100 hover:bg-amber-200 px-2.5 py-1 rounded-lg font-bold transition flex items-center gap-1">
+                            <i class="fa-solid fa-file-csv"></i> CSV
+                        </button>
+                        <button @click="exportJSON" class="text-slate-600 bg-slate-200 hover:bg-slate-300 px-2.5 py-1 rounded-lg font-bold transition flex items-center gap-1">
+                            <i class="fa-solid fa-file-code"></i> JSON
+                        </button>
+                    </div>
+                </div>
+
+                <div v-if="logs.length === 0" class="text-center py-10 bg-white/60 rounded-2xl border border-dashed border-slate-200">
+                    <p class="text-slate-400 text-xs">まだ記録がありません。<br>上のボタンから記録を追加してください 🐾</p>
+                </div>
+
+                <div v-else class="space-y-3">
+                    <div v-for="log in logs" :key="log.id" class="bg-white rounded-2xl p-3.5 shadow-sm border border-slate-100 flex items-start gap-3 relative">
+                        <div class="text-2xl p-2 rounded-xl flex-shrink-0" :class="{
+                            'bg-orange-50': log.category === 'food',
+                            'bg-cyan-50': log.category === 'water',
+                            'bg-amber-50': log.category === 'toilet',
+                            'bg-rose-50': log.category === 'symptom'
+                        }">
+                            <span v-if="log.category === 'food'">🍚</span>
+                            <span v-else-if="log.category === 'water'">💧</span>
+                            <span v-else-if="log.category === 'toilet'">🚽</span>
+                            <span v-else>⚠️</span>
+                        </div>
+
+                        <div class="flex-grow min-w-0 pr-6">
+                            <div class="flex items-center gap-2 mb-1">
+                                <span class="text-xs font-bold text-slate-400">{{ formatTime(log.timestamp) }}</span>
+                                <span class="text-xs font-semibold px-2 py-0.5 rounded-full" :class="{
+                                    'bg-orange-100 text-orange-700': log.category === 'food',
+                                    'bg-cyan-100 text-cyan-700': log.category === 'water',
+                                    'bg-amber-100 text-amber-700': log.category === 'toilet',
+                                    'bg-rose-100 text-rose-700': log.category === 'symptom'
+                                }">
+                                    {{ log.title }}
+                                </span>
+                            </div>
+
+                            <div v-if="log.category === 'food'" class="text-xs text-slate-700 space-y-0.5">
+                                <p><span class="text-slate-400">種類:</span> {{ log.details?.type }}</p>
+                                <p><span class="text-slate-400">食べた量:</span> <span class="font-bold text-orange-600">{{ log.details?.amount }}</span></p>
+                                <p v-if="log.details?.note" class="text-slate-500 italic mt-1">「{{ log.details.note }}」</p>
+                            </div>
+
+                            <div v-else-if="log.category === 'water'" class="text-xs text-slate-700 space-y-0.5">
+                                <p><span class="text-slate-400">飲んだ量:</span> <span class="font-bold text-cyan-600">{{ log.details?.amount }}</span></p>
+                                <p v-if="log.details?.note" class="text-slate-500 italic mt-1">「{{ log.details.note }}」</p>
+                            </div>
+
+                            <div v-else-if="log.category === 'toilet'" class="text-xs text-slate-700 space-y-0.5">
+                                <p><span class="text-slate-400">種類:</span> <span class="font-bold">{{ log.details?.type }}</span></p>
+                                <p><span class="text-slate-400">量:</span> {{ log.details?.amount }}</p>
+                                <p v-if="log.details?.note" class="text-slate-500 italic mt-1">「{{ log.details.note }}」</p>
+                            </div>
+
+                            <div v-else-if="log.category === 'symptom'" class="text-xs text-slate-700 space-y-0.5">
+                                <p class="font-bold text-rose-600 mb-1">{{ log.details?.symptomType }}</p>
+                                <p class="text-slate-600 whitespace-pre-wrap bg-slate-50 p-2 rounded-lg">{{ log.details?.description }}</p>
+                            </div>
+                        </div>
+
+                        <button @click="deleteLog(log.id)" class="absolute top-3 right-3 text-slate-300 hover:text-rose-500 p-1">
+                            <i class="fa-solid fa-xmark text-sm"></i>
+                        </button>
+                    </div>
+                </div>
+            </section>
+        </div>
+
+        <!-- ================= タブ2: BIダッシュボード ================= -->
+        <div v-show="currentTab === 'bi'" class="space-y-5">
+            <!-- 任意の日付選択 ＆ 詳細確認セクション -->
+            <section class="bg-white p-4 rounded-2xl shadow-sm border border-slate-100">
+                <div class="flex items-center justify-between mb-3 pb-2 border-b border-slate-100">
+                    <label class="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+                        <i class="fa-solid fa-calendar-day text-amber-600"></i> 日付を指定して詳細確認
+                    </label>
+                    <input type="date" v-model="selectedBiDate" class="text-xs font-bold border border-slate-200 rounded-xl p-1.5 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-amber-400">
+                </div>
+
+                <div class="mb-3 text-xs font-bold text-amber-800 bg-amber-50 px-3 py-1.5 rounded-lg inline-block">
+                    📅 {{ formatDateLabel(selectedBiDate) }} の集計
+                </div>
+
+                <div class="grid grid-cols-2 gap-2 text-xs">
+                    <!-- ごはん詳細 -->
+                    <div class="bg-orange-50/60 p-2.5 rounded-xl border border-orange-100">
+                        <div class="flex justify-between items-center mb-1">
+                            <span class="font-bold text-orange-800">🍚 ごはん</span>
+                            <span class="font-extrabold text-orange-600 text-sm">{{ selectedBiDetails.food.total }} 回</span>
+                        </div>
+                        <div class="text-[11px] text-slate-600 space-y-0.5 pl-1">
+                            <p v-for="(count, type) in selectedBiDetails.food.types" :key="type" class="flex justify-between">
+                                <span>{{ type }}:</span> <span class="font-semibold text-slate-800">{{ count }}回</span>
+                            </p>
+                        </div>
+                    </div>
+
+                    <!-- 水詳細 -->
+                    <div class="bg-cyan-50/60 p-2.5 rounded-xl border border-cyan-100 flex flex-col justify-between">
+                        <div>
+                            <div class="flex justify-between items-center mb-1">
+                                <span class="font-bold text-cyan-800">💧 水</span>
+                                <span class="font-extrabold text-cyan-600 text-sm">{{ selectedBiDetails.water.total }} 回</span>
+                            </div>
+                            <p class="text-[10px] text-slate-400 mt-2">水分補給の合計回数です</p>
+                        </div>
+                    </div>
+
+                    <!-- トイレ詳細 -->
+                    <div class="bg-amber-50/60 p-2.5 rounded-xl border border-amber-100">
+                        <div class="flex justify-between items-center mb-1">
+                            <span class="font-bold text-amber-800">🚽 トイレ</span>
+                            <span class="font-extrabold text-amber-600 text-sm">{{ selectedBiDetails.toilet.total }} 回</span>
+                        </div>
+                        <div class="text-[11px] text-slate-600 space-y-0.5 pl-1">
+                            <p v-for="(count, type) in selectedBiDetails.toilet.types" :key="type" class="flex justify-between">
+                                <span>{{ type }}:</span> <span class="font-semibold text-slate-800">{{ count }}回</span>
+                            </p>
+                        </div>
+                    </div>
+
+                    <!-- 症状詳細 -->
+                    <div class="bg-rose-50/60 p-2.5 rounded-xl border border-rose-100">
+                        <div class="flex justify-between items-center mb-1">
+                            <span class="font-bold text-rose-800">⚠️ 症状・異変</span>
+                            <span class="font-extrabold text-rose-600 text-sm">{{ selectedBiDetails.symptom.total }} 件</span>
+                        </div>
+                        <div class="text-[11px] text-slate-600 space-y-0.5 pl-1">
+                            <p v-for="(count, type) in selectedBiDetails.symptom.types" :key="type" class="flex justify-between">
+                                <span>{{ type }}:</span> <span class="font-semibold text-slate-800">{{ count }}件</span>
+                            </p>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 1. ごはんの個別積み上げ棒グラフ（直近7日固定） -->
+            <section class="bg-white p-4 rounded-2xl shadow-sm border border-slate-100">
+                <h3 class="text-xs font-bold text-slate-700 mb-3 flex items-center justify-between">
+                    <span>🍚 ごはんの回数・内訳推移 (直近7日間)</span>
+                    <span class="text-[10px] font-normal text-slate-400">単位: 回</span>
+                </h3>
+                <div class="relative h-48 w-full">
+                    <canvas id="foodChart"></canvas>
+                </div>
+            </section>
+
+            <!-- 2. 水の個別棒グラフ（直近7日固定） -->
+            <section class="bg-white p-4 rounded-2xl shadow-sm border border-slate-100">
+                <h3 class="text-xs font-bold text-slate-700 mb-3 flex items-center justify-between">
+                    <span>💧 水の回数推移 (直近7日間)</span>
+                    <span class="text-[10px] font-normal text-slate-400">単位: 回</span>
+                </h3>
+                <div class="relative h-48 w-full">
+                    <canvas id="waterChart"></canvas>
+                </div>
+            </section>
+
+            <!-- 3. トイレの個別積み上げ棒グラフ（直近7日固定） -->
+            <section class="bg-white p-4 rounded-2xl shadow-sm border border-slate-100">
+                <h3 class="text-xs font-bold text-slate-700 mb-3 flex items-center justify-between">
+                    <span>🚽 トイレの回数・内訳推移 (直近7日間)</span>
+                    <span class="text-[10px] font-normal text-slate-400">単位: 回</span>
+                </h3>
+                <div class="relative h-48 w-full">
+                    <canvas id="toiletChart"></canvas>
+                </div>
+            </section>
+
+            <!-- 4. 症状の個別積み上げ棒グラフ（直近7日固定） -->
+            <section class="bg-white p-4 rounded-2xl shadow-sm border border-slate-100">
+                <h3 class="text-xs font-bold text-slate-700 mb-3 flex items-center justify-between">
+                    <span>⚠️ 症状・異変の件数・内訳推移 (直近7日間)</span>
+                    <span class="text-[10px] font-normal text-slate-400">単位: 件</span>
+                </h3>
+                <div class="relative h-48 w-full">
+                    <canvas id="symptomChart"></canvas>
+                </div>
+            </section>
+        </div>
+
+        <!-- ================= モーダル ================= -->
+        <div v-if="activeCategory" class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
+            <div class="bg-white w-full max-w-md rounded-t-3xl sm:rounded-3xl p-5 shadow-xl animate-slide-up max-h-[90vh] overflow-y-auto">
+                <div class="flex justify-between items-center mb-4 pb-2 border-b border-slate-100">
+                    <h3 class="font-bold text-slate-800 text-lg flex items-center gap-2">
+                        <span v-if="activeCategory === 'food'">🍚 ごはんを記録</span>
+                        <span v-else-if="activeCategory === 'water'">💧 水を記録</span>
+                        <span v-else-if="activeCategory === 'toilet'">🚽 トイレを記録</span>
+                        <span v-else-if="activeCategory === 'symptom'">⚠️ 嘔吐・症状を記録</span>
+                    </h3>
+                    <button @click="closeModal" :disabled="isSaving" class="text-slate-400 hover:text-slate-600 p-1">
+                        <i class="fa-solid fa-xmark text-lg"></i>
+                    </button>
+                </div>
+
+                <div class="mb-4">
+                    <label class="block text-xs font-bold text-slate-500 mb-1">日時 (自動入力)</label>
+                    <input type="datetime-local" v-model="form.timestamp" class="w-full text-xs border border-slate-200 rounded-xl p-2.5 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-amber-400">
+                </div>
+
+                <!-- ごはんフォーム -->
+                <div v-if="activeCategory === 'food'" class="space-y-4">
+                    <div>
+                        <label class="block text-xs font-bold text-slate-600 mb-1.5">ごはんの種類</label>
+                        <div class="grid grid-cols-2 gap-2">
+                            <button v-for="type in ['ドライ', 'ウェット', '水分サプリ', 'おやつ']" :key="type"
+                                type="button" @click="form.food.type = type"
+                                class="py-2 px-2 text-xs rounded-xl border font-medium transition"
+                                :class="form.food.type === type ? 'bg-orange-500 text-white border-orange-500' : 'bg-slate-50 text-slate-700 border-slate-200'">
+                                {{ type }}
+                            </button>
+                        </div>
+                    </div>
+                    <div>
+                        <label class="block text-xs font-bold text-slate-600 mb-1.5">食べた量</label>
+                        <div class="grid grid-cols-3 gap-2">
+                            <button v-for="amount in ['多め', '普通', '少なめ']" :key="amount"
+                                type="button" @click="form.food.amount = amount"
+                                class="py-2.5 px-2 text-xs rounded-xl border font-medium transition"
+                                :class="form.food.amount === amount ? 'bg-orange-500 text-white border-orange-500' : 'bg-slate-50 text-slate-700 border-slate-200'">
+                                {{ amount }}
+                            </button>
+                        </div>
+                    </div>
+                    <div>
+                        <label class="block text-xs font-bold text-slate-600 mb-1">備考</label>
+                        <input type="text" v-model="form.food.note" placeholder="例: カリカリ30g" class="w-full text-xs border border-slate-200 rounded-xl p-2.5 focus:outline-none focus:ring-2 focus:ring-amber-400">
+                    </div>
+                </div>
+
+                <!-- 水フォーム -->
+                <div v-if="activeCategory === 'water'" class="space-y-4">
+                    <div>
+                        <label class="block text-xs font-bold text-slate-600 mb-1.5">飲んだ量</label>
+                        <div class="grid grid-cols-3 gap-2">
+                            <button v-for="amount in ['多め', '普通', '少なめ']" :key="amount"
+                                type="button" @click="form.water.amount = amount"
+                                class="py-2.5 px-2 text-xs rounded-xl border font-medium transition"
+                                :class="form.water.amount === amount ? 'bg-cyan-500 text-white border-cyan-500' : 'bg-slate-50 text-slate-700 border-slate-200'">
+                                {{ amount }}
+                            </button>
+                        </div>
+                    </div>
+                    <div>
+                        <label class="block text-xs font-bold text-slate-600 mb-1">備考</label>
+                        <input type="text" v-model="form.water.note" placeholder="例: 容器から直接飲んだ" class="w-full text-xs border border-slate-200 rounded-xl p-2.5 focus:outline-none focus:ring-2 focus:ring-amber-400">
+                    </div>
+                </div>
+
+                <!-- トイレフォーム -->
+                <div v-if="activeCategory === 'toilet'" class="space-y-4">
+                    <div>
+                        <label class="block text-xs font-bold text-slate-600 mb-1.5">種別</label>
+                        <div class="grid grid-cols-3 gap-2">
+                            <button v-for="tType in ['おしっこ', 'うんこ', '両方']" :key="tType"
+                                type="button" @click="form.toilet.type = tType"
+                                class="py-2.5 px-3 text-xs rounded-xl border font-medium transition"
+                                :class="form.toilet.type === tType ? 'bg-amber-500 text-white border-amber-500' : 'bg-slate-50 text-slate-700 border-slate-200'">
+                                {{ tType }}
+                            </button>
+                        </div>
+                    </div>
+                    <div>
+                        <label class="block text-xs font-bold text-slate-600 mb-1.5">出した量</label>
+                        <div class="grid grid-cols-3 gap-2">
+                            <button v-for="amount in ['多め', '普通', '少なめ']" :key="amount"
+                                type="button" @click="form.toilet.amount = amount"
+                                class="py-2 px-2 text-xs rounded-xl border font-medium transition"
+                                :class="form.toilet.amount === amount ? 'bg-amber-500 text-white border-amber-500' : 'bg-slate-50 text-slate-700 border-slate-200'">
+                                {{ amount }}
+                            </button>
+                        </div>
+                    </div>
+                    <div>
+                        <label class="block text-xs font-bold text-slate-600 mb-1">備考</label>
+                        <input type="text" v-model="form.toilet.note" placeholder="例: 硬さ普通" class="w-full text-xs border border-slate-200 rounded-xl p-2.5 focus:outline-none focus:ring-2 focus:ring-amber-400">
+                    </div>
+                </div>
+
+                <!-- 症状フォーム -->
+                <div v-if="activeCategory === 'symptom'" class="space-y-4">
+                    <div>
+                        <label class="block text-xs font-bold text-slate-600 mb-1.5">症状の分類</label>
+                        <div class="grid grid-cols-2 gap-2">
+                            <button v-for="sType in ['嘔吐（ごはん）', '嘔吐（毛玉）', '嘔吐（胃液）', 'その他']" :key="sType"
+                                type="button" @click="form.symptom.symptomType = sType"
+                                class="py-2.5 px-2 text-xs rounded-xl border font-medium transition text-center"
+                                :class="form.symptom.symptomType === sType ? 'bg-rose-500 text-white border-rose-500' : 'bg-slate-50 text-slate-700 border-slate-200'">
+                                {{ sType }}
+                            </button>
+                        </div>
+                    </div>
+                    <div>
+                        <label class="block text-xs font-bold text-slate-600 mb-1">症状の詳細</label>
+                        <textarea v-model="form.symptom.description" rows="3" placeholder="例: 吐いた後は元気あり" class="w-full text-xs border border-slate-200 rounded-xl p-2.5 focus:outline-none focus:ring-2 focus:ring-amber-400"></textarea>
+                    </div>
+                </div>
+
+                <button @click="saveLog" :disabled="isSaving" class="w-full mt-6 py-3 bg-amber-600 hover:bg-amber-700 text-white text-sm font-bold rounded-xl shadow-md transition active:scale-98 flex items-center justify-center gap-2">
+                    <i v-if="isSaving" class="fa-solid fa-spinner fa-spin"></i>
+                    <span>{{ isSaving ? '保存中...' : '記録を保存する' }}</span>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <style>
+        @keyframes slideUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
+        .animate-slide-up { animation: slideUp 0.2s ease-out forwards; }
+    </style>
+</body>
+</html>
+
