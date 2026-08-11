@@ -17,12 +17,12 @@
         import { createApp, ref, computed, watch, nextTick, onMounted } from "https://unpkg.com/vue@3/dist/vue.esm-browser.js";
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, collection, addDoc, deleteDoc, doc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getFirestore, collection, addDoc, deleteDoc, updateDoc, doc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // Chart.js Datalabels プラグインの登録
         Chart.register(ChartDataLabels);
 
-        // Firebase初期化（本番環境設定を適用）
+        // Firebase初期化（本番環境設定）
         const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {
             apiKey: "AIzaSyAwhsXGF-wOUwYxDdNI0t4_YDdkmQ4l7Z4",
             authDomain: "maxrecord.firebaseapp.com",
@@ -44,6 +44,7 @@
                 const logs = ref([]);
                 const currentTab = ref('input');
                 const activeCategory = ref(null);
+                const editingLogId = ref(null);
                 const isOnline = ref(false);
                 const isSaving = ref(false);
                 const currentUser = ref(null);
@@ -134,17 +135,51 @@
                     return `${year}-${month}-${day}T${hours}:${minutes}`;
                 };
 
+                // 新規入力用モーダルを開く
                 const openModal = (category) => {
+                    editingLogId.value = null;
                     activeCategory.value = category;
                     form.value.timestamp = getCurrentDateTimeString();
+                };
+
+                // 編集用モーダルを開く
+                const openEditModal = (log) => {
+                    editingLogId.value = log.id;
+                    activeCategory.value = log.category;
+                    form.value.timestamp = log.timestamp || getCurrentDateTimeString();
+
+                    if (log.category === 'food') {
+                        form.value.food = {
+                            type: log.details?.type || 'ドライ',
+                            amount: log.details?.amount || '普通',
+                            note: log.details?.note || ''
+                        };
+                    } else if (log.category === 'water') {
+                        form.value.water = {
+                            amount: log.details?.amount || '普通',
+                            note: log.details?.note || ''
+                        };
+                    } else if (log.category === 'toilet') {
+                        form.value.toilet = {
+                            type: log.details?.type || 'おしっこ',
+                            amount: log.details?.amount || '普通',
+                            note: log.details?.note || ''
+                        };
+                    } else if (log.category === 'symptom') {
+                        form.value.symptom = {
+                            symptomType: log.details?.symptomType || '嘔吐（毛玉）',
+                            description: log.details?.description || ''
+                        };
+                    }
                 };
 
                 const closeModal = () => {
                     if (isSaving.value) return;
                     activeCategory.value = null;
+                    editingLogId.value = null;
                 };
 
-                // ログ保存処理
+                // ログ保存処理（新規・更新共通）
                 const saveLog = async () => {
                     if (!currentUser.value) {
                         alert("サーバー接続中です。しばらく待ってから再度お試しください。");
@@ -170,23 +205,30 @@
                         details = { ...form.value.symptom };
                     }
 
-                    const newLog = {
+                    const logData = {
                         category: activeCategory.value,
                         title: title,
                         timestamp: form.value.timestamp,
                         details: details,
-                        createdAt: new Date().toISOString()
+                        updatedAt: new Date().toISOString()
                     };
 
                     try {
-                        const colRef = collection(db, 'artifacts', appId, 'public', 'data', 'cat_logs');
-                        await addDoc(colRef, newLog);
+                        if (editingLogId.value) {
+                            const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'cat_logs', editingLogId.value);
+                            await updateDoc(docRef, logData);
+                        } else {
+                            logData.createdAt = new Date().toISOString();
+                            const colRef = collection(db, 'artifacts', appId, 'public', 'data', 'cat_logs');
+                            await addDoc(colRef, logData);
+                        }
                         
                         form.value.food.note = '';
                         form.value.water.note = '';
                         form.value.toilet.note = '';
                         form.value.symptom.description = '';
                         activeCategory.value = null;
+                        editingLogId.value = null;
                     } catch (e) {
                         console.error("保存失敗:", e);
                         alert("データの保存に失敗しました。通信環境を確認してください。");
@@ -426,8 +468,8 @@
                 };
 
                 return {
-                    logs, currentTab, activeCategory, form, todayStr, selectedBiDate, selectedBiDetails,
-                    isOnline, isSaving, openModal, closeModal, saveLog, deleteLog,
+                    logs, currentTab, activeCategory, editingLogId, form, todayStr, selectedBiDate, selectedBiDetails,
+                    isOnline, isSaving, openModal, openEditModal, closeModal, saveLog, deleteLog,
                     exportCSV, exportJSON, todaySummary, formatTime, formatDateLabel
                 };
             }
@@ -543,7 +585,7 @@
                             <span v-else>⚠️</span>
                         </div>
 
-                        <div class="flex-grow min-w-0 pr-6">
+                        <div class="flex-grow min-w-0 pr-12">
                             <div class="flex items-center gap-2 mb-1">
                                 <span class="text-xs font-bold text-slate-400">{{ formatTime(log.timestamp) }}</span>
                                 <span class="text-xs font-semibold px-2 py-0.5 rounded-full" :class="{
@@ -579,9 +621,15 @@
                             </div>
                         </div>
 
-                        <button @click="deleteLog(log.id)" class="absolute top-3 right-3 text-slate-300 hover:text-rose-500 p-1">
-                            <i class="fa-solid fa-xmark text-sm"></i>
-                        </button>
+                        <!-- 編集・削除ボタン -->
+                        <div class="absolute top-3 right-3 flex items-center gap-1">
+                            <button @click="openEditModal(log)" class="text-slate-300 hover:text-amber-600 p-1 transition" title="編集">
+                                <i class="fa-solid fa-pen-to-square text-xs"></i>
+                            </button>
+                            <button @click="deleteLog(log.id)" class="text-slate-300 hover:text-rose-500 p-1 transition" title="削除">
+                                <i class="fa-solid fa-xmark text-sm"></i>
+                            </button>
+                        </div>
                     </div>
                 </div>
             </section>
@@ -705,7 +753,8 @@
             <div class="bg-white w-full max-w-md rounded-t-3xl sm:rounded-3xl p-5 shadow-xl animate-slide-up max-h-[90vh] overflow-y-auto">
                 <div class="flex justify-between items-center mb-4 pb-2 border-b border-slate-100">
                     <h3 class="font-bold text-slate-800 text-lg flex items-center gap-2">
-                        <span v-if="activeCategory === 'food'">🍚 ごはんを記録</span>
+                        <span v-if="editingLogId">✏️ 記録を編集</span>
+                        <span v-else-if="activeCategory === 'food'">🍚 ごはんを記録</span>
                         <span v-else-if="activeCategory === 'water'">💧 水を記録</span>
                         <span v-else-if="activeCategory === 'toilet'">🚽 トイレを記録</span>
                         <span v-else-if="activeCategory === 'symptom'">⚠️ 嘔吐・症状を記録</span>
@@ -716,7 +765,7 @@
                 </div>
 
                 <div class="mb-4">
-                    <label class="block text-xs font-bold text-slate-500 mb-1">日時 (自動入力)</label>
+                    <label class="block text-xs font-bold text-slate-500 mb-1">日時</label>
                     <input type="datetime-local" v-model="form.timestamp" class="w-full text-xs border border-slate-200 rounded-xl p-2.5 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-amber-400">
                 </div>
 
@@ -820,7 +869,7 @@
 
                 <button @click="saveLog" :disabled="isSaving" class="w-full mt-6 py-3 bg-amber-600 hover:bg-amber-700 text-white text-sm font-bold rounded-xl shadow-md transition active:scale-98 flex items-center justify-center gap-2">
                     <i v-if="isSaving" class="fa-solid fa-spinner fa-spin"></i>
-                    <span>{{ isSaving ? '保存中...' : '記録を保存する' }}</span>
+                    <span>{{ isSaving ? '保存中...' : (editingLogId ? '変更を保存する' : '記録を保存する') }}</span>
                 </button>
             </div>
         </div>
@@ -832,4 +881,3 @@
     </style>
 </body>
 </html>
-
