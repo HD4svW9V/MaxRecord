@@ -17,7 +17,9 @@
         import { createApp, ref, computed, watch, nextTick, onMounted } from "https://unpkg.com/vue@3/dist/vue.esm-browser.js";
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, collection, addDoc, deleteDoc, updateDoc, doc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getFirestore, collection, addDoc, deleteDoc, updateDoc, doc, onSnapshot, runTransaction } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        import { prepareFood, round1, daily, grams, isPee, isPoop } from "./health-core.mjs";
 
         // Chart.js Datalabels プラグインの登録
         Chart.register(ChartDataLabels);
@@ -46,6 +48,9 @@
                 const activeCategory = ref(null);
                 const editingLogId = ref(null);
                 const isOnline = ref(false);
+                const syncError = ref('');
+                const syncedAt = ref('');
+                const filterCategory = ref('all');
                 const isSaving = ref(false);
                 const currentUser = ref(null);
 
@@ -68,9 +73,11 @@
 
                 const form = ref({
                     timestamp: '',
-                    food: { type: 'ドライ', amount: '普通', note: '' },
-                    water: { amount: '普通', note: '' },
+                    food: { type: 'ドライ', amount: '普通', note: '', dryAction: 'serve', serveGrams: '', discardGrams: '', grams: '', targetServeLogId: '' },
+                    water: { amount: '普通', ml: '', note: '' },
                     toilet: { type: 'おしっこ', amount: '普通', note: '' },
+                    fluid: { hasFluid: true, hasAppetiteStimulant: false, note: '' },
+                    notice: { description: '' },
                     symptom: { symptomType: '嘔吐（毛玉）', description: '' }
                 });
 
@@ -89,13 +96,12 @@
                             await signInAnonymously(auth);
                         }
                     } catch (e) {
-                        console.error("認証エラー:", e);
+                        console.error("認証エラー:", e); syncError.value = "接続できません。再読み込みしてください。";
                     }
 
                     onAuthStateChanged(auth, (user) => {
                         currentUser.value = user;
                         if (user) {
-                            isOnline.value = true;
                             listenToFirestore();
                         } else {
                             isOnline.value = false;
@@ -111,7 +117,7 @@
 
                     const colRef = collection(db, 'artifacts', appId, 'public', 'data', 'cat_logs');
 
-                    unsubscribeFirestore = onSnapshot(colRef, (snapshot) => {
+                    unsubscribeFirestore = onSnapshot(colRef, { includeMetadataChanges: true }, (snapshot) => {
                         const fetchedLogs = [];
                         snapshot.forEach((docSnap) => {
                             fetchedLogs.push({ id: docSnap.id, ...docSnap.data() });
@@ -119,8 +125,10 @@
 
                         fetchedLogs.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
                         logs.value = fetchedLogs;
+                        isOnline.value = !snapshot.metadata.fromCache && !snapshot.metadata.hasPendingWrites;
+                        if (isOnline.value) { syncedAt.value = new Date().toLocaleString("ja-JP"); syncError.value = ""; }
                     }, (err) => {
-                        console.error("データ取得エラー:", err);
+                        console.error("データ取得エラー:", err); syncError.value = "取得できません。再読み込みしてください。";
                         isOnline.value = false;
                     });
                 };
@@ -140,6 +148,12 @@
                     editingLogId.value = null;
                     activeCategory.value = category;
                     form.value.timestamp = getCurrentDateTimeString();
+                    form.value.food = { type: 'ドライ', amount: '普通', note: '', dryAction: 'serve', serveGrams: '', discardGrams: '', grams: '', targetServeLogId: '' };
+                    form.value.water = { amount: '普通', ml: '', note: '' };
+                    form.value.toilet = { type: 'おしっこ', amount: '普通', note: '' };
+                    form.value.fluid = { hasFluid: true, hasAppetiteStimulant: false, note: '' };
+                    form.value.notice = { description: '' };
+                    form.value.symptom = { symptomType: '嘔吐（毛玉）', description: '' };
                 };
 
                 // 編集用モーダルを開く
@@ -150,12 +164,15 @@
 
                     if (log.category === 'food') {
                         form.value.food = {
+                            ...log.details,
                             type: log.details?.type || 'ドライ',
+                            dryAction: log.details?.dryAction || 'legacy',
                             amount: log.details?.amount || '普通',
                             note: log.details?.note || ''
                         };
                     } else if (log.category === 'water') {
                         form.value.water = {
+                            ml: log.details?.ml ?? '',
                             amount: log.details?.amount || '普通',
                             note: log.details?.note || ''
                         };
@@ -165,6 +182,10 @@
                             amount: log.details?.amount || '普通',
                             note: log.details?.note || ''
                         };
+                    } else if (log.category === 'fluid') {
+                        form.value.fluid = { ...log.details };
+                    } else if (log.category === 'notice') {
+                        form.value.notice = { ...log.details };
                     } else if (log.category === 'symptom') {
                         form.value.symptom = {
                             symptomType: log.details?.symptomType || '嘔吐（毛玉）',
@@ -179,89 +200,90 @@
                     editingLogId.value = null;
                 };
 
-                // ログ保存処理（新規・更新共通）
-                const saveLog = async () => {
-                    if (!currentUser.value) {
-                        alert("サーバー接続中です。しばらく待ってから再度お試しください。");
-                        return;
-                    }
-
-                    isSaving.value = true;
-
-                    let title = '';
-                    let details = {};
-
-                    if (activeCategory.value === 'food') {
-                        title = 'ごはん';
-                        details = { ...form.value.food };
-                    } else if (activeCategory.value === 'water') {
-                        title = '水';
-                        details = { ...form.value.water };
-                    } else if (activeCategory.value === 'toilet') {
-                        title = 'トイレ';
-                        details = { ...form.value.toilet };
-                    } else if (activeCategory.value === 'symptom') {
-                        title = '症状・異変';
-                        details = { ...form.value.symptom };
-                    }
-
-                    const logData = {
-                        category: activeCategory.value,
-                        title: title,
-                        timestamp: form.value.timestamp,
-                        details: details,
-                        updatedAt: new Date().toISOString()
-                    };
-
-                    try {
-                        if (editingLogId.value) {
-                            const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'cat_logs', editingLogId.value);
-                            await updateDoc(docRef, logData);
-                        } else {
-                            logData.createdAt = new Date().toISOString();
-                            const colRef = collection(db, 'artifacts', appId, 'public', 'data', 'cat_logs');
-                            await addDoc(colRef, logData);
-                        }
-                        
-                        form.value.food.note = '';
-                        form.value.water.note = '';
-                        form.value.toilet.note = '';
-                        form.value.symptom.description = '';
-                        activeCategory.value = null;
-                        editingLogId.value = null;
-                    } catch (e) {
-                        console.error("保存失敗:", e);
-                        alert("データの保存に失敗しました。通信環境を確認してください。");
-                    } finally {
-                        isSaving.value = false;
-                    }
+                const activeDryServes = computed(() => logs.value.filter(l => l.category === 'food' && l.details?.dryAction === 'serve' && !l.details?.isClosed));
+                const filteredLogs = computed(() => logs.value.filter(l => filterCategory.value === 'all' || l.category === filterCategory.value));
+                const openDiscardModal = log => {
+                    openModal('food');
+                    Object.assign(form.value.food, { dryAction: 'discard', targetServeLogId: log.id, serveGrams: log.details.serveGrams });
                 };
-
-                // ログ削除処理
-                const deleteLog = async (id) => {
-                    if (!confirm('この記録を削除しますか？（共有相手の画面からも消去されます）')) return;
-
+                const setNowToForm = () => { form.value.timestamp = getCurrentDateTimeString(); };
+                const labels = { food: 'ごはん', water: '水', toilet: 'トイレ', fluid: '補液等', symptom: '異変', notice: '気付きメモ' };
+                const saveLog = async () => {
+                    if (isSaving.value) return;
+                    if (!isOnline.value || !currentUser.value) { alert('サーバーへの接続を確認してから保存してください。入力内容はこの画面に残ります。'); return; }
+                    isSaving.value = true;
                     try {
-                        const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'cat_logs', id);
-                        await deleteDoc(docRef);
-                    } catch (e) {
-                        console.error("削除失敗:", e);
-                        alert("削除に失敗しました。");
-                    }
+                        const category = activeCategory.value;
+                        const timestamp = form.value.timestamp;
+                        if (!timestamp || !Number.isFinite(new Date(timestamp).getTime())) throw Error('記録日時を入力してください。');
+                        const details = category === 'food' ? prepareFood(form.value.food) : { ...form.value[category] };
+                        if (category === 'water') details.ml = grams(details.ml, '飲水量', true);
+                        if (category === 'food' && ['instant','discard'].includes(details.dryAction)) details.effectiveDate = timestamp.slice(0,10);
+                        if (category === 'fluid' && !details.hasFluid && !details.hasAppetiteStimulant && !details.note?.trim()) throw Error('補液・食欲増進剤・メモのいずれかを入力してください。');
+                        if (category === 'notice' && !details.description?.trim()) throw Error('気付きメモを入力してください。');
+                        const editId = editingLogId.value;
+                        const col = collection(db, 'artifacts', appId, 'public', 'data', 'cat_logs');
+                        const ref = editId ? doc(col, editId) : doc(col);
+                        await runTransaction(db, async tx => {
+                            const existing = editId ? await tx.get(ref) : null;
+                            if (editId && !existing.exists()) throw Error('この記録は削除されています。');
+                            const old = existing?.data();
+                            const d = { ...(old?.details || {}), ...details };
+                            // Keep record kind and relationships stable when editing linked records.
+                            if (old?.details?.dryAction && (old.details.dryAction !== d.dryAction || old.details.type !== d.type)) throw Error('配膳・廃棄の記録方法は編集で変更できません。');
+                            if (old?.details?.isClosed && d.dryAction === 'serve') throw Error('回収済みの配膳は編集できません。先に対応する廃棄記録を削除してください。');
+                            let targetRef = null, target = null;
+                            if (category === 'food' && d.dryAction === 'discard') {
+                                if (!d.targetServeLogId) throw Error('配膳中のカードから廃棄を記録してください。配膳記録がない場合は「まとめて入力」を選択してください。');
+                                if (old && old.details.targetServeLogId !== d.targetServeLogId) throw Error('対応する配膳は変更できません。');
+                                targetRef = doc(col, d.targetServeLogId);
+                                const snap = await tx.get(targetRef);
+                                if (!snap.exists()) throw Error('対応する配膳が削除されています。');
+                                target = snap.data();
+                                if (target.details?.dryAction !== 'serve' || target.details?.type !== 'ドライ') throw Error('配膳記録が不正です。');
+                                if (target.details.isClosed && target.details.closedBy !== ref.id) throw Error('この配膳はすでに回収済みです。');
+                                if (timestamp < target.timestamp) throw Error('廃棄日時は配膳日時以降にしてください。');
+                                d.serveGrams = target.details.serveGrams;
+                                if (d.discardGrams > d.serveGrams) throw Error('廃棄量が配膳量を超えています。');
+                                d.eatenGrams = round1(d.serveGrams - d.discardGrams);
+                            }
+                            const now = new Date().toISOString();
+                            tx.set(ref, { ...(old || {}), category, title: labels[category], timestamp, details: d, updatedAt: now, createdAt: old?.createdAt || now });
+                            if (targetRef) tx.update(targetRef, { 'details.isClosed': true, 'details.closedBy': ref.id, updatedAt: now });
+                        });
+                        activeCategory.value = null; editingLogId.value = null;
+                    } catch(e) { alert(e.message || '保存できませんでした。入力内容は残っています。'); }
+                    finally { isSaving.value = false; }
+                };
+                const deleteLog = async id => {
+                    if (isSaving.value || !isOnline.value) { alert('接続を確認してから操作してください。'); return; }
+                    if (!confirm('この記録を削除しますか？共有相手の画面からも削除されます。')) return;
+                    isSaving.value = true;
+                    try {
+                        const col = collection(db, 'artifacts', appId, 'public', 'data', 'cat_logs');
+                        await runTransaction(db, async tx => {
+                            const ref = doc(col,id), snap = await tx.get(ref);
+                            if (!snap.exists()) return;
+                            const d = snap.data().details || {};
+                            if (d.dryAction === 'serve' && d.isClosed) throw Error('回収済みです。先に対応する廃棄記録を削除してください。');
+                            let targetRef = null, target = null;
+                            if (d.dryAction === 'discard' && d.targetServeLogId) {
+                                targetRef = doc(col,d.targetServeLogId);
+                                target = await tx.get(targetRef);
+                            }
+                            tx.delete(ref);
+                            if (target?.exists() && target.data().details?.closedBy === id) tx.update(targetRef, { 'details.isClosed': false, 'details.closedBy': '', updatedAt: new Date().toISOString() });
+                        });
+                    } catch(e) { alert(e.message || '削除できませんでした。'); }
+                    finally { isSaving.value = false; }
                 };
 
                 const exportCSV = () => {
                     if (logs.value.length === 0) return;
-                    const headers = ["日時", "カテゴリー", "項目名", "種類/分類", "量", "詳細/備考"];
-                    const rows = logs.value.map(log => [
-                        `"${log.timestamp ? log.timestamp.replace('T', ' ') : ''}"`,
-                        `"${log.category || ''}"`,
-                        `"${log.title || ''}"`,
-                        `"${log.details?.type || log.details?.symptomType || ''}"`,
-                        `"${log.details?.amount || ''}"`,
-                        `"${(log.details?.note || log.details?.description || '').replace(/"/g, '""')}"`
-                    ]);
-                    const csvContent = [headers.join(","), ...rows.map(e => e.join(","))].join("\n");
+                    const headers = ["日時","カテゴリー","項目名","種類/分類","量","配膳(g)","廃棄(g)","実食(g)","その他食事(g)","補液","増進剤","備考"];
+                    const escape = v => '"' + String(v ?? '').replace(/"/g, '""') + '"';
+                    const rows = logs.value.map(l => [l.timestamp,l.category,l.title,l.details?.type || l.details?.symptomType,l.details?.amount,l.details?.serveGrams,l.details?.discardGrams,l.details?.eatenGrams,l.details?.grams,l.details?.hasFluid,l.details?.hasAppetiteStimulant,l.details?.note || l.details?.description]);
+                    const csvContent = [headers,...rows].map(row=>row.map(escape).join(',')).join('\r\n');
                     const blob = new Blob(["\uFEFF" + csvContent], { type: 'text/csv;charset=utf-8;' });
                     const url = URL.createObjectURL(blob);
                     const link = document.createElement("a");
@@ -298,15 +320,20 @@
                     }
                     const targetLogs = logs.value.filter(log => log.timestamp && log.timestamp.startsWith(selectedBiDate.value));
 
-                    const foodLogs = targetLogs.filter(l => l.category === 'food');
+                    // 廃棄を伴うドライ記録は、配膳日ではなく実食量の集計日で数える。
+                    const foodLogs = logs.value.filter(l => l.category === 'food' && l.details?.dryAction !== 'serve' &&
+                        (l.details?.effectiveDate || l.timestamp?.slice(0, 10)) === selectedBiDate.value);
                     const foodTypes = { 'ドライ': 0, 'ウェット': 0, '水分サプリ': 0, 'おやつ': 0 };
                     foodLogs.forEach(l => { if (l.details?.type && foodTypes[l.details.type] !== undefined) foodTypes[l.details.type]++; });
 
                     const waterLogs = targetLogs.filter(l => l.category === 'water');
 
                     const toiletLogs = targetLogs.filter(l => l.category === 'toilet');
-                    const toiletTypes = { 'おしっこ': 0, 'うんこ': 0, '両方': 0 };
-                    toiletLogs.forEach(l => { if (l.details?.type && toiletTypes[l.details.type] !== undefined) toiletTypes[l.details.type]++; });
+                    const toiletTypes = { '尿': 0, '便': 0 };
+                    toiletLogs.forEach(l => {
+                        if (isPee(l.details?.type)) toiletTypes['尿']++;
+                        if (isPoop(l.details?.type)) toiletTypes['便']++;
+                    });
 
                     const symptomLogs = targetLogs.filter(l => l.category === 'symptom');
                     const symptomTypes = { '嘔吐（ごはん）': 0, '嘔吐（毛玉）': 0, '嘔吐（胃液）': 0, 'その他': 0 };
@@ -379,7 +406,7 @@
                     const foodDatasets = foodTypes.map((type, idx) => ({
                         label: type,
                         backgroundColor: foodColors[idx],
-                        data: sortedDates.map(d => logs.value.filter(l => l.category === 'food' && l.timestamp && l.timestamp.startsWith(d) && l.details?.type === type).length)
+                        data: sortedDates.map(d => logs.value.filter(l => l.category === 'food' && l.details?.dryAction !== 'serve' && (l.details?.effectiveDate || l.timestamp?.slice(0,10)) === d && l.details?.type === type).length)
                     }));
 
                     const ctxFood = document.getElementById('foodChart')?.getContext('2d');
@@ -408,12 +435,12 @@
                     }
 
                     // 3. トイレ（積み上げ）
-                    const toiletTypes = ['おしっこ', 'うんこ', '両方'];
-                    const toiletColors = ['#3b82f6', '#d97706', '#10b981'];
+                    const toiletTypes = [{ label: '尿', matches: isPee }, { label: '便', matches: isPoop }];
+                    const toiletColors = ['#3b82f6', '#d97706'];
                     const toiletDatasets = toiletTypes.map((type, idx) => ({
-                        label: type,
+                        label: type.label,
                         backgroundColor: toiletColors[idx],
-                        data: sortedDates.map(d => logs.value.filter(l => l.category === 'toilet' && l.timestamp && l.timestamp.startsWith(d) && l.details?.type === type).length)
+                        data: sortedDates.map(d => logs.value.filter(l => l.category === 'toilet' && l.timestamp && l.timestamp.startsWith(d) && type.matches(l.details?.type)).length)
                     }));
 
                     const ctxToilet = document.getElementById('toiletChart')?.getContext('2d');
@@ -467,7 +494,44 @@
                     return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日(${WEEKDAYS[d.getDay()]})`;
                 };
 
+                const categories = [
+                    {id:'food',label:'ごはん',icon:'🍚',hint:'ドライ配膳・廃棄・ウェット',color:'#fed7aa'},
+                    {id:'water',label:'水',icon:'💧',hint:'自発飲水・水分補給',color:'#a5f3fc'},
+                    {id:'toilet',label:'トイレ',icon:'🚽',hint:'尿・便',color:'#fde68a'},
+                    {id:'fluid',label:'補液等',icon:'💉',hint:'皮下輸液・食欲増進剤',color:'#bae6fd'},
+                    {id:'symptom',label:'異変',icon:'⚠️',hint:'嘔吐（ごはん・毛玉・胃液等）',color:'#fecdd3'},
+                    {id:'notice',label:'気付きメモ',icon:'💡',hint:'日々の様子・ご機嫌・自由記述',color:'#fde68a'}
+                ];
+                const clock = ref(new Date());
+                setInterval(() => { clock.value = new Date(); },30000);
+                const todayHealth = computed(() => daily(logs.value, localDate(clock.value)));
+                function localDate(d) { return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; }
+                const weekly = computed(() => Array.from({length:7},(_,i) => {
+                    const d = new Date(clock.value); d.setDate(d.getDate()-6+i); return daily(logs.value,localDate(d));
+                }));
+                const recentNotes = computed(() => logs.value.filter(l => ['notice','symptom'].includes(l.category) && l.timestamp?.slice(0,10)>=weekly.value[0].date && l.timestamp?.slice(0,10)<=weekly.value[6].date));
+                const selectServe = () => { const l=activeDryServes.value.find(l=>l.id===form.value.food.targetServeLogId); form.value.food.serveGrams=l?.details?.serveGrams ?? ''; };
+                const foodPreview = computed(() => { try { const d=prepareFood(form.value.food); return d.eatenGrams===undefined?'—':`${d.eatenGrams} g`; } catch { return '配膳量・廃棄量を確認してください'; } });
+                let integrated = null;
+                const series = [ {key:'dry',label:'ドライ実食 (g)',color:'#ea580c'}, {key:'water',label:'水 (回)',color:'#0891b2'}, {key:'pee',label:'おしっこ (回)',color:'#ca8a04'}, {key:'poop',label:'うんこ (回)',color:'#92400e'}, {key:'symptom',label:'異変 (件)',color:'#e11d48'} ];
+                watch([currentTab,weekly], async () => {
+                    await nextTick(); if(currentTab.value!=='bi') return;
+                    integrated?.destroy();
+                    integrated = new Chart(document.getElementById('integratedChart'), { type:'line', data:{labels:weekly.value.map(d=>[d.date.slice(5),`${d.fluid?'補液 ':''}${d.stimulant?'増進剤':''}`]), datasets:series.map(s=>({label:s.label,data:weekly.value.map(d=>d[s.key]),borderColor:s.color,backgroundColor:s.color,yAxisID:s.key==='dry'?'grams':'counts',spanGaps:false,tension:0.1}))}, options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{boxWidth:8,font:{size:9}}},datalabels:{display:false}},scales:{grams:{position:'left',beginAtZero:true,title:{display:true,text:'g'}},counts:{position:'right',beginAtZero:true,ticks:{precision:0},grid:{drawOnChartArea:false}}}} });
+                },{deep:true});
+                const reportRows = computed(() => [...series, {key:'legacy',label:'旧ドライ記録 (回)',color:'#64748b'}]);
+                const reportX = i => 190+i*140;
+                const maxGrams = computed(() => Math.max(5,...weekly.value.map(d=>d.dry||0)));
+                const maxCounts = computed(() => Math.max(2,...weekly.value.flatMap(d=>[d.water,d.pee,d.poop,d.symptom])));
+                const reportY = (value,key) => 205-(value/(key==='dry'?maxGrams.value:maxCounts.value))*145;
+                const reportSegments = key => weekly.value.slice(1).map((d,i)=>({a:weekly.value[i][key],b:d[key],i})).filter(p=>p.a!=null&&p.b!=null);
+                const printReport = async () => {
+                    if(!isOnline.value || !syncedAt.value) { alert('最新データの取得後に印刷してください。'); return; }
+                    await nextTick(); window.print();
+                };
                 return {
+                    categories, weekly, todayHealth, recentNotes, selectServe, foodPreview, printReport, reportRows, series, reportX, reportY, reportSegments, maxGrams, maxCounts,
+                    syncError, syncedAt, filterCategory, filteredLogs, activeDryServes, openDiscardModal, setNowToForm, round1,
                     logs, currentTab, activeCategory, editingLogId, form, todayStr, selectedBiDate, selectedBiDetails,
                     isOnline, isSaving, openModal, openEditModal, closeModal, saveLog, deleteLog,
                     exportCSV, exportJSON, todaySummary, formatTime, formatDateLabel
@@ -477,7 +541,7 @@
     </script>
 </head>
 <body class="bg-slate-50 min-h-screen text-slate-800 pb-16">
-    <div id="app" class="max-w-md mx-auto px-4 py-6">
+    <div id="app" v-cloak class="max-w-md mx-auto px-4 py-6">
         <!-- ヘッダー -->
         <header class="text-center mb-4">
             <h1 class="text-2xl font-bold text-amber-800 flex items-center justify-center gap-2">
@@ -487,13 +551,13 @@
                 <p class="text-xs text-slate-500">日々の記録 ＆ ヘルスケア分析</p>
                 <span class="text-[10px] px-2 py-0.5 rounded-full font-bold transition" :class="isOnline ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'">
                     <i class="fa-solid fa-arrows-rotate mr-0.5" :class="{'fa-spin': isOnline}"></i>
-                    {{ isOnline ? 'リアルタイム同期中' : '接続中...' }}
+                    {{ isOnline ? '同期済み' : (syncError || '接続確認中・保存できません') }}
                 </span>
             </div>
         </header>
 
         <!-- タブ切り替え -->
-        <div class="flex bg-slate-200/80 p-1 rounded-2xl mb-6 shadow-inner">
+        <div class="no-print flex bg-slate-200/80 p-1 rounded-2xl mb-6 shadow-inner">
             <button @click="currentTab = 'input'" 
                 class="flex-1 py-2 text-xs font-bold rounded-xl transition flex items-center justify-center gap-1"
                 :class="currentTab === 'input' ? 'bg-white text-amber-800 shadow-sm' : 'text-slate-600 hover:text-slate-800'">
@@ -502,29 +566,19 @@
             <button @click="currentTab = 'bi'" 
                 class="flex-1 py-2 text-xs font-bold rounded-xl transition flex items-center justify-center gap-1"
                 :class="currentTab === 'bi' ? 'bg-white text-amber-800 shadow-sm' : 'text-slate-600 hover:text-slate-800'">
-                <i class="fa-solid fa-chart-pie"></i> BIダッシュボード
+                <i class="fa-solid fa-chart-pie"></i> 週間分析・カルテ
             </button>
         </div>
 
         <!-- ================= タブ1: 記録・履歴 ================= -->
-        <div v-show="currentTab === 'input'">
-            <!-- クイック記録ボタン -->
-            <div class="grid grid-cols-4 gap-2 mb-6">
-                <button @click="openModal('food')" class="bg-white border-2 border-orange-200 hover:border-orange-400 p-2.5 rounded-2xl shadow-sm flex flex-col items-center justify-center transition active:scale-95">
-                    <span class="text-2xl mb-1">🍚</span>
-                    <span class="text-[11px] font-bold text-slate-700">ごはん</span>
-                </button>
-                <button @click="openModal('water')" class="bg-white border-2 border-cyan-200 hover:border-cyan-400 p-2.5 rounded-2xl shadow-sm flex flex-col items-center justify-center transition active:scale-95">
-                    <span class="text-2xl mb-1">💧</span>
-                    <span class="text-[11px] font-bold text-slate-700">水</span>
-                </button>
-                <button @click="openModal('toilet')" class="bg-white border-2 border-amber-200 hover:border-amber-400 p-2.5 rounded-2xl shadow-sm flex flex-col items-center justify-center transition active:scale-95">
-                    <span class="text-2xl mb-1">🚽</span>
-                    <span class="text-[11px] font-bold text-slate-700">トイレ</span>
-                </button>
-                <button @click="openModal('symptom')" class="bg-white border-2 border-rose-200 hover:border-rose-400 p-2.5 rounded-2xl shadow-sm flex flex-col items-center justify-center transition active:scale-95">
-                    <span class="text-2xl mb-1">⚠️</span>
-                    <span class="text-[11px] font-bold text-slate-700">症状</span>
+        <div v-show="currentTab === 'input'" class="no-print">
+            <div v-for="serve in activeDryServes" :key="serve.id" class="bg-gradient-to-r from-orange-500 to-amber-500 text-white rounded-2xl p-3 mb-2 flex justify-between items-center gap-2">
+                <div><strong class="text-xs">🍽️ お皿に出ているドライフード {{ serve.details.serveGrams }}g</strong><p class="text-[10px]">配膳: {{ formatTime(serve.timestamp) }} {{ serve.details.note }}</p></div>
+                <button @click="openDiscardModal(serve)" class="bg-white text-orange-700 rounded-xl px-3 py-2 text-xs font-bold">廃棄</button>
+            </div>
+            <div class="space-y-2 mb-4">
+                <button v-for="cat in categories" :key="cat.id" @click="openModal(cat.id)" class="w-full bg-white border p-2.5 rounded-2xl shadow-sm flex items-center justify-between active:scale-[0.98]" :style="{borderColor:cat.color}">
+                    <div class="flex items-center gap-3"><span class="text-2xl p-1.5 rounded-xl bg-slate-50">{{ cat.icon }}</span><div class="text-left"><span class="text-xs font-bold block">{{ cat.label }}</span><span class="text-[10px] text-slate-400">{{ cat.hint }}</span></div></div><span class="text-slate-300">›</span>
                 </button>
             </div>
 
@@ -533,16 +587,15 @@
                 <h2 class="text-xs font-bold uppercase tracking-wider text-amber-700 mb-2">今日の記録まとめ ({{ todayStr }})</h2>
                 <div class="grid grid-cols-4 gap-1.5 text-center text-xs">
                     <div class="bg-white/80 rounded-lg p-1.5">
-                        <span class="block text-slate-500 text-[10px]">ごはん</span>
-                        <span class="text-sm font-bold text-orange-600">{{ todaySummary.food }} 回</span>
+                        <span class="block text-slate-500 text-[10px]">ドライ実食</span><span class="text-sm font-bold text-orange-600">{{ todayHealth.dry == null ? '未計量' : todayHealth.dry + ' g' }}</span><span v-if="todayHealth.legacy" class="block text-[9px]">旧記録 {{ todayHealth.legacy }}回（量不明）</span>
                     </div>
                     <div class="bg-white/80 rounded-lg p-1.5">
                         <span class="block text-slate-500 text-[10px]">水</span>
                         <span class="text-sm font-bold text-cyan-600">{{ todaySummary.water }} 回</span>
                     </div>
                     <div class="bg-white/80 rounded-lg p-1.5">
-                        <span class="block text-slate-500 text-[10px]">トイレ</span>
-                        <span class="text-sm font-bold text-amber-600">{{ todaySummary.toilet }} 回</span>
+                        <span class="block text-slate-500 text-[10px]">尿 / 便</span>
+                        <span class="text-sm font-bold text-amber-600">{{ todayHealth.pee }} / {{ todayHealth.poop }} 回</span>
                     </div>
                     <div class="bg-white/80 rounded-lg p-1.5">
                         <span class="block text-slate-500 text-[10px]">症状</span>
@@ -567,12 +620,13 @@
                     </div>
                 </div>
 
-                <div v-if="logs.length === 0" class="text-center py-10 bg-white/60 rounded-2xl border border-dashed border-slate-200">
-                    <p class="text-slate-400 text-xs">まだ記録がありません。<br>上のボタンから記録を追加してください 🐾</p>
+                <div class="flex gap-1 overflow-x-auto pb-3 text-[11px]"><button @click="filterCategory='all'" class="shrink-0 px-2 py-1 rounded-lg border" :class="filterCategory==='all'?'bg-amber-800 text-white':'bg-white'">すべて</button><button v-for="cat in categories" @click="filterCategory=cat.id" class="shrink-0 px-2 py-1 rounded-lg border" :class="filterCategory===cat.id?'bg-amber-800 text-white':'bg-white'">{{ cat.icon }} {{ cat.label }}</button></div>
+                <div v-if="filteredLogs.length === 0" class="text-center py-10 bg-white/60 rounded-2xl border border-dashed border-slate-200">
+                    <p class="text-slate-400 text-xs">該当する記録がありません。<br>上のボタンから記録を追加してください 🐾</p>
                 </div>
 
                 <div v-else class="space-y-3">
-                    <div v-for="log in logs" :key="log.id" class="bg-white rounded-2xl p-3.5 shadow-sm border border-slate-100 flex items-start gap-3 relative">
+                    <div v-for="log in filteredLogs" :key="log.id" class="bg-white rounded-2xl p-3.5 shadow-sm border border-slate-100 flex items-start gap-3 relative">
                         <div class="text-2xl p-2 rounded-xl flex-shrink-0" :class="{
                             'bg-orange-50': log.category === 'food',
                             'bg-cyan-50': log.category === 'water',
@@ -600,12 +654,16 @@
 
                             <div v-if="log.category === 'food'" class="text-xs text-slate-700 space-y-0.5">
                                 <p><span class="text-slate-400">種類:</span> {{ log.details?.type }}</p>
-                                <p><span class="text-slate-400">食べた量:</span> <span class="font-bold text-orange-600">{{ log.details?.amount }}</span></p>
+                                <template v-if="log.details?.dryAction">
+                                    <p v-if="log.details.dryAction==='serve'" class="font-bold text-orange-600">{{ log.details.serveGrams }}g 配膳（{{ log.details.isClosed ? '回収済' : '配膳中' }}）</p>
+                                    <template v-else><p class="font-bold text-orange-600">実食 {{ log.details.eatenGrams }}g</p><p class="text-[10px]">配膳 {{ log.details.serveGrams }}g − 廃棄 {{ log.details.discardGrams }}g / 集計日 {{ log.details.effectiveDate }}</p></template>
+                                </template>
+                                <p v-else><span class="text-slate-400">食べた量:</span> <span class="font-bold text-orange-600">{{ log.details?.grams !== undefined && log.details?.grams !== '' ? log.details.grams + 'g' : log.details?.amount }}</span><span v-if="log.details?.type==='ドライ'" class="text-[10px]">（旧記録・グラム数不明）</span></p>
                                 <p v-if="log.details?.note" class="text-slate-500 italic mt-1">「{{ log.details.note }}」</p>
                             </div>
 
                             <div v-else-if="log.category === 'water'" class="text-xs text-slate-700 space-y-0.5">
-                                <p><span class="text-slate-400">飲んだ量:</span> <span class="font-bold text-cyan-600">{{ log.details?.amount }}</span></p>
+                                <p v-if="log.details?.ml !== undefined && log.details?.ml !== ''" class="text-xs">{{ log.details.ml }}ml</p><p><span class="text-slate-400">飲んだ量:</span> <span class="font-bold text-cyan-600">{{ log.details?.amount }}</span></p>
                                 <p v-if="log.details?.note" class="text-slate-500 italic mt-1">「{{ log.details.note }}」</p>
                             </div>
 
@@ -615,6 +673,8 @@
                                 <p v-if="log.details?.note" class="text-slate-500 italic mt-1">「{{ log.details.note }}」</p>
                             </div>
 
+                            <div v-else-if="log.category === 'fluid'" class="text-xs"><p class="font-bold text-sky-700">{{ log.details?.hasFluid ? '💉 補液あり' : '' }} {{ log.details?.hasAppetiteStimulant ? '💊 食欲増進剤あり' : '' }}</p><p class="text-slate-500">{{ log.details?.note }}</p></div>
+                            <div v-else-if="log.category === 'notice'" class="text-xs whitespace-pre-wrap">💡 {{ log.details?.description }}</div>
                             <div v-else-if="log.category === 'symptom'" class="text-xs text-slate-700 space-y-0.5">
                                 <p class="font-bold text-rose-600 mb-1">{{ log.details?.symptomType }}</p>
                                 <p class="text-slate-600 whitespace-pre-wrap bg-slate-50 p-2 rounded-lg">{{ log.details?.description }}</p>
@@ -635,8 +695,13 @@
             </section>
         </div>
 
-        <!-- ================= タブ2: BIダッシュボード ================= -->
-        <div v-show="currentTab === 'bi'" class="space-y-5">
+        <!-- ================= タブ2: 週間分析・カルテ ================= -->
+        <div v-show="currentTab === 'bi'" class="space-y-5 no-print">
+            <div class="flex items-center justify-between"><strong class="text-xs">直近7日間の推移</strong><button @click="printReport" :disabled="!isOnline" class="bg-indigo-600 text-white text-xs font-bold rounded-xl px-3 py-2 disabled:opacity-40">PDFで保存 / 印刷</button></div>
+            <section class="bg-white p-4 rounded-2xl border"><div class="relative h-64"><canvas id="integratedChart"></canvas></div></section>
+            <section class="bg-white p-3 rounded-2xl border overflow-x-auto"><table class="w-full text-[10px] whitespace-nowrap"><thead><tr><th>日付</th><th>ドライ実食</th><th>水</th><th>尿</th><th>便</th><th>異変</th></tr></thead><tbody><tr v-for="d in weekly" class="border-t"><td class="py-2">{{ d.date.slice(5) }} {{ d.fluid ? '補' : '' }} {{ d.stimulant ? '薬' : '' }}</td><td>{{ d.dry == null ? '—' : d.dry+'g' }}<span v-if="d.legacy"> +旧{{ d.legacy }}回</span></td><td>{{ d.water }}回</td><td>{{ d.pee }}回</td><td>{{ d.poop }}回</td><td>{{ d.symptom }}件</td></tr></tbody></table><p class="text-[10px] text-slate-500 mt-2">—：実食量の計量記録なし。旧記録はグラムに換算せず回数を表示。</p></section>
+            <section class="bg-white p-4 rounded-2xl border"><h3 class="text-xs font-bold mb-2">直近7日間の気付き・異変メモ</h3><p v-if="!recentNotes.length" class="text-xs text-slate-400">記録はありません。</p><div v-for="log in recentNotes" class="text-xs border-t py-2"><strong>{{ formatTime(log.timestamp) }} {{ log.details?.symptomType }}</strong><p class="whitespace-pre-wrap">{{ log.details?.description }}</p></div></section>
+            <p class="text-xs font-bold text-slate-500">日付指定・回数の内訳（従来の記録も表示）</p>
             <!-- 任意の日付選択 ＆ 詳細確認セクション -->
             <section class="bg-white p-4 rounded-2xl shadow-sm border border-slate-100">
                 <div class="flex items-center justify-between mb-3 pb-2 border-b border-slate-100">
@@ -748,8 +813,22 @@
             </section>
         </div>
 
+        <div class="print-only">
+            <h2 style="font-size:18px;font-weight:bold">マックスの健康日記・通院用レポート</h2>
+            <p style="font-size:10px">期間 {{ weekly[0].date }} ～ {{ weekly[6].date }} ／ データ取得日時 {{ syncedAt }}（端末の現地時刻）</p>
+            <svg viewBox="0 0 1160 455" style="width:100%;height:auto" role="img" aria-label="7日間の推移と日付軸を合わせた数値表">
+                <text x="10" y="28" font-size="12">左軸：ドライ実食 g</text><text x="1015" y="28" font-size="12">右軸：回数・件数</text>
+                <g v-for="n in [0,1,2,3,4]"><line x1="150" x2="1070" :y1="205-n*36.25" :y2="205-n*36.25" stroke="#e2e8f0"/><text x="135" :y="209-n*36.25" text-anchor="end" font-size="10">{{ round1(maxGrams*n/4) }}</text><text x="1080" :y="209-n*36.25" font-size="10">{{ round1(maxCounts*n/4) }}</text></g>
+                <g v-for="s in series"><line v-for="seg in reportSegments(s.key)" :x1="reportX(seg.i)" :x2="reportX(seg.i+1)" :y1="reportY(seg.a,s.key)" :y2="reportY(seg.b,s.key)" :stroke="s.color" stroke-width="2"/><template v-for="(d,i) in weekly"><circle v-if="d[s.key]!=null" :cx="reportX(i)" :cy="reportY(d[s.key],s.key)" r="3" :fill="s.color"/></template></g>
+                <g v-for="(d,i) in weekly"><line :x1="reportX(i)" :x2="reportX(i)" y1="50" y2="440" stroke="#cbd5e1" stroke-dasharray="2 4"/><text :x="reportX(i)" y="231" text-anchor="middle" font-size="12" font-weight="bold">{{ d.date.slice(5) }}</text><text :x="reportX(i)" y="250" text-anchor="middle" font-size="10">{{ d.fluid?'ⓞ 補液':'' }} {{ d.stimulant?'増進剤':'' }}</text></g>
+                <g v-for="(s,row) in reportRows"><rect x="0" :y="263+row*29" width="1135" height="29" :fill="row%2?'#f8fafc':'#fff'"/><text x="10" :y="282+row*29" :fill="s.color" font-size="12" font-weight="bold">{{ s.label }}</text><text v-for="(d,i) in weekly" :x="reportX(i)" :y="282+row*29" text-anchor="middle" font-size="12">{{ d[s.key]==null?'—':d[s.key] }}</text></g>
+            </svg>
+            <p style="font-size:10px">—：計量記録なし。実食量は廃棄日で集計。旧ドライ記録はグラム数不明のため回数で併記。「両方」の旧トイレ記録は尿・便それぞれ1回に算入。</p>
+            <div style="font-size:10px;margin-top:8px"><strong>気付き・異変メモ</strong><p v-if="!recentNotes.length">記録なし</p><p v-for="log in recentNotes.slice(0,5)" style="white-space:pre-wrap">{{ formatTime(log.timestamp) }} {{ log.details?.symptomType }} {{ (log.details?.description||'').slice(0,100) }}{{ (log.details?.description||'').length>100?'…（全文はアプリ参照）':'' }}</p><p v-if="recentNotes.length>5">ほか {{ recentNotes.length-5 }} 件（全文はアプリ参照）</p></div>
+        </div>
+
         <!-- ================= モーダル ================= -->
-        <div v-if="activeCategory" class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
+        <div v-if="activeCategory" class="no-print fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
             <div class="bg-white w-full max-w-md rounded-t-3xl sm:rounded-3xl p-5 shadow-xl animate-slide-up max-h-[90vh] overflow-y-auto">
                 <div class="flex justify-between items-center mb-4 pb-2 border-b border-slate-100">
                     <h3 class="font-bold text-slate-800 text-lg flex items-center gap-2">
@@ -757,7 +836,7 @@
                         <span v-else-if="activeCategory === 'food'">🍚 ごはんを記録</span>
                         <span v-else-if="activeCategory === 'water'">💧 水を記録</span>
                         <span v-else-if="activeCategory === 'toilet'">🚽 トイレを記録</span>
-                        <span v-else-if="activeCategory === 'symptom'">⚠️ 嘔吐・症状を記録</span>
+                        <span v-else-if="activeCategory === 'fluid'">💉 補液等を記録</span><span v-else-if="activeCategory === 'notice'">💡 気付きメモ</span><span v-else-if="activeCategory === 'symptom'">⚠️ 嘔吐・症状を記録</span>
                     </h3>
                     <button @click="closeModal" :disabled="isSaving" class="text-slate-400 hover:text-slate-600 p-1">
                         <i class="fa-solid fa-xmark text-lg"></i>
@@ -765,7 +844,7 @@
                 </div>
 
                 <div class="mb-4">
-                    <label class="block text-xs font-bold text-slate-500 mb-1">日時</label>
+                    <div class="flex justify-between"><label class="block text-xs font-bold text-slate-500 mb-1">日時</label><button @click="setNowToForm" class="text-xs text-amber-700">現在時刻</button></div>
                     <input type="datetime-local" v-model="form.timestamp" class="w-full text-xs border border-slate-200 rounded-xl p-2.5 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-amber-400">
                 </div>
 
@@ -775,13 +854,20 @@
                         <label class="block text-xs font-bold text-slate-600 mb-1.5">ごはんの種類</label>
                         <div class="grid grid-cols-2 gap-2">
                             <button v-for="type in ['ドライ', 'ウェット', '水分サプリ', 'おやつ']" :key="type"
-                                type="button" @click="form.food.type = type"
+                                type="button" @click="form.food.type = type" :disabled="Boolean(editingLogId)"
                                 class="py-2 px-2 text-xs rounded-xl border font-medium transition"
                                 :class="form.food.type === type ? 'bg-orange-500 text-white border-orange-500' : 'bg-slate-50 text-slate-700 border-slate-200'">
                                 {{ type }}
                             </button>
                         </div>
                     </div>
+                    <div v-if="form.food.type==='ドライ' && form.food.dryAction!=='legacy'" class="p-3 bg-orange-50 rounded-2xl border border-orange-100 space-y-3">
+                        <div class="flex gap-1"><button v-for="action in [{id:'serve',label:'① 配膳'},{id:'discard',label:'② 廃棄'},{id:'instant',label:'まとめて入力'}]" :disabled="Boolean(editingLogId)" @click="form.food.dryAction=action.id" class="flex-1 rounded-lg text-xs py-2 border" :class="form.food.dryAction===action.id?'bg-orange-500 text-white':'bg-white'">{{ action.label }}</button></div>
+                        <div v-if="form.food.dryAction==='discard' && !editingLogId"><label class="text-xs">片付ける配膳</label><select v-model="form.food.targetServeLogId" @change="selectServe" class="w-full rounded-xl border p-2 text-xs"><option value="">選択してください</option><option v-for="serve in activeDryServes" :value="serve.id">{{ formatTime(serve.timestamp) }} {{ serve.details.serveGrams }}g {{ serve.details.note }}</option></select></div>
+                        <label class="block text-xs font-bold">配膳量 (g)<input v-model="form.food.serveGrams" :readonly="form.food.dryAction==='discard'" type="text" inputmode="decimal" class="w-full border rounded-xl p-2 mt-1" placeholder="例: 3.2"></label>
+                        <template v-if="form.food.dryAction!=='serve'"><label class="block text-xs font-bold">廃棄量 (g)<input v-model="form.food.discardGrams" type="text" inputmode="decimal" class="w-full border rounded-xl p-2 mt-1" placeholder="完食の場合は0"></label><p class="text-xs font-bold text-orange-700">実食量: {{ foodPreview }}</p><p class="text-[10px]">日付をまたいでも、廃棄した日時で実食量を集計します。</p></template>
+                    </div>
+                    <div v-if="form.food.type!=='ドライ'"><label class="block text-xs font-bold">食べた量 (g / 任意)<input v-model="form.food.grams" type="text" inputmode="decimal" class="w-full border rounded-xl p-2 mt-1"></label><div v-if="form.food.type==='おやつ'" class="flex gap-2 mt-2"><button v-for="g in [1,2,3,5,14]" @click="form.food.grams=g" class="flex-1 border rounded-lg py-1 text-xs">{{g}}g</button></div></div>
                     <div>
                         <label class="block text-xs font-bold text-slate-600 mb-1.5">食べた量</label>
                         <div class="grid grid-cols-3 gap-2">
@@ -818,12 +904,13 @@
                     </div>
                 </div>
 
+<div v-if="activeCategory==='water'" class="mt-3"><label class="text-xs font-bold">飲水量 (ml / 任意)<input v-model="form.water.ml" type="text" inputmode="decimal" class="w-full border rounded-xl p-2.5 mt-1"></label></div>
                 <!-- トイレフォーム -->
                 <div v-if="activeCategory === 'toilet'" class="space-y-4">
                     <div>
                         <label class="block text-xs font-bold text-slate-600 mb-1.5">種別</label>
                         <div class="grid grid-cols-3 gap-2">
-                            <button v-for="tType in ['おしっこ', 'うんこ', '両方']" :key="tType"
+                            <button v-for="tType in (editingLogId && !['おしっこ','うんち'].includes(form.toilet.type) ? ['おしっこ', 'うんち', form.toilet.type] : ['おしっこ', 'うんち'])" :key="tType"
                                 type="button" @click="form.toilet.type = tType"
                                 class="py-2.5 px-3 text-xs rounded-xl border font-medium transition"
                                 :class="form.toilet.type === tType ? 'bg-amber-500 text-white border-amber-500' : 'bg-slate-50 text-slate-700 border-slate-200'">
@@ -848,6 +935,8 @@
                     </div>
                 </div>
 
+                <div v-if="activeCategory==='fluid'" class="space-y-4"><label class="flex justify-between p-4 bg-sky-50 rounded-xl text-sm font-bold">💉 皮下輸液（補液）<input type="checkbox" v-model="form.fluid.hasFluid"></label><label class="flex justify-between p-4 bg-emerald-50 rounded-xl text-sm font-bold">💊 食欲増進剤<input type="checkbox" v-model="form.fluid.hasAppetiteStimulant"></label><label class="block text-xs">メモ<input v-model="form.fluid.note" class="w-full p-2.5 border rounded-xl mt-1" placeholder="実施時の様子など"></label></div>
+                <div v-if="activeCategory==='notice'"><label class="text-xs font-bold">気付きの自由メモ<textarea v-model="form.notice.description" rows="4" class="w-full p-2.5 border rounded-xl mt-1" placeholder="日々の様子・ご機嫌など"></textarea></label></div>
                 <!-- 症状フォーム -->
                 <div v-if="activeCategory === 'symptom'" class="space-y-4">
                     <div>
@@ -876,6 +965,11 @@
     </div>
 
     <style>
+        [v-cloak] { display:none; }
+        button:disabled { opacity:.45; cursor:not-allowed; }
+        .print-only { display:none; }
+        @page { size: A4 landscape; margin: 9mm; }
+        @media print { .no-print, header { display:none!important; } body { background:white!important; padding:0!important; } #app { max-width:none!important; padding:0!important; } .print-only { display:block!important; } }
         @keyframes slideUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
         .animate-slide-up { animation: slideUp 0.2s ease-out forwards; }
     </style>
