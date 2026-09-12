@@ -19,7 +19,7 @@
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, collection, addDoc, deleteDoc, updateDoc, doc, onSnapshot, runTransaction } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
-        import { prepareFood, round1, daily, grams } from "./health-core.mjs";
+        import { prepareFood, round1, daily, grams, isPee, isPoop } from "./health-core.mjs";
 
         // Chart.js Datalabels プラグインの登録
         Chart.register(ChartDataLabels);
@@ -320,15 +320,20 @@
                     }
                     const targetLogs = logs.value.filter(log => log.timestamp && log.timestamp.startsWith(selectedBiDate.value));
 
-                    const foodLogs = targetLogs.filter(l => l.category === 'food' && l.details?.dryAction !== 'serve');
+                    // 廃棄を伴うドライ記録は、配膳日ではなく実食量の集計日で数える。
+                    const foodLogs = logs.value.filter(l => l.category === 'food' && l.details?.dryAction !== 'serve' &&
+                        (l.details?.effectiveDate || l.timestamp?.slice(0, 10)) === selectedBiDate.value);
                     const foodTypes = { 'ドライ': 0, 'ウェット': 0, '水分サプリ': 0, 'おやつ': 0 };
                     foodLogs.forEach(l => { if (l.details?.type && foodTypes[l.details.type] !== undefined) foodTypes[l.details.type]++; });
 
                     const waterLogs = targetLogs.filter(l => l.category === 'water');
 
                     const toiletLogs = targetLogs.filter(l => l.category === 'toilet');
-                    const toiletTypes = { 'おしっこ': 0, 'うんこ': 0, '両方': 0 };
-                    toiletLogs.forEach(l => { if (l.details?.type && toiletTypes[l.details.type] !== undefined) toiletTypes[l.details.type]++; });
+                    const toiletTypes = { '尿': 0, '便': 0 };
+                    toiletLogs.forEach(l => {
+                        if (isPee(l.details?.type)) toiletTypes['尿']++;
+                        if (isPoop(l.details?.type)) toiletTypes['便']++;
+                    });
 
                     const symptomLogs = targetLogs.filter(l => l.category === 'symptom');
                     const symptomTypes = { '嘔吐（ごはん）': 0, '嘔吐（毛玉）': 0, '嘔吐（胃液）': 0, 'その他': 0 };
@@ -401,7 +406,7 @@
                     const foodDatasets = foodTypes.map((type, idx) => ({
                         label: type,
                         backgroundColor: foodColors[idx],
-                        data: sortedDates.map(d => logs.value.filter(l => l.category === 'food' && l.details?.dryAction !== 'serve' && l.timestamp && l.timestamp.startsWith(d) && l.details?.type === type).length)
+                        data: sortedDates.map(d => logs.value.filter(l => l.category === 'food' && l.details?.dryAction !== 'serve' && (l.details?.effectiveDate || l.timestamp?.slice(0,10)) === d && l.details?.type === type).length)
                     }));
 
                     const ctxFood = document.getElementById('foodChart')?.getContext('2d');
@@ -430,12 +435,12 @@
                     }
 
                     // 3. トイレ（積み上げ）
-                    const toiletTypes = ['おしっこ', 'うんこ', '両方'];
-                    const toiletColors = ['#3b82f6', '#d97706', '#10b981'];
+                    const toiletTypes = [{ label: '尿', matches: isPee }, { label: '便', matches: isPoop }];
+                    const toiletColors = ['#3b82f6', '#d97706'];
                     const toiletDatasets = toiletTypes.map((type, idx) => ({
-                        label: type,
+                        label: type.label,
                         backgroundColor: toiletColors[idx],
-                        data: sortedDates.map(d => logs.value.filter(l => l.category === 'toilet' && l.timestamp && l.timestamp.startsWith(d) && l.details?.type === type).length)
+                        data: sortedDates.map(d => logs.value.filter(l => l.category === 'toilet' && l.timestamp && l.timestamp.startsWith(d) && type.matches(l.details?.type)).length)
                     }));
 
                     const ctxToilet = document.getElementById('toiletChart')?.getContext('2d');
@@ -492,7 +497,7 @@
                 const categories = [
                     {id:'food',label:'ごはん',icon:'🍚',hint:'ドライ配膳・廃棄・ウェット',color:'#fed7aa'},
                     {id:'water',label:'水',icon:'💧',hint:'自発飲水・水分補給',color:'#a5f3fc'},
-                    {id:'toilet',label:'トイレ',icon:'🚽',hint:'おしっこ・うんこ',color:'#fde68a'},
+                    {id:'toilet',label:'トイレ',icon:'🚽',hint:'尿・便',color:'#fde68a'},
                     {id:'fluid',label:'補液等',icon:'💉',hint:'皮下輸液・食欲増進剤',color:'#bae6fd'},
                     {id:'symptom',label:'異変',icon:'⚠️',hint:'嘔吐（ごはん・毛玉・胃液等）',color:'#fecdd3'},
                     {id:'notice',label:'気付きメモ',icon:'💡',hint:'日々の様子・ご機嫌・自由記述',color:'#fde68a'}
@@ -905,7 +910,7 @@
                     <div>
                         <label class="block text-xs font-bold text-slate-600 mb-1.5">種別</label>
                         <div class="grid grid-cols-3 gap-2">
-                            <button v-for="tType in (editingLogId && form.toilet.type==='両方' ? ['おしっこ', 'うんこ', '両方'] : ['おしっこ', 'うんこ'])" :key="tType"
+                            <button v-for="tType in (editingLogId && !['おしっこ','うんち'].includes(form.toilet.type) ? ['おしっこ', 'うんち', form.toilet.type] : ['おしっこ', 'うんち'])" :key="tType"
                                 type="button" @click="form.toilet.type = tType"
                                 class="py-2.5 px-3 text-xs rounded-xl border font-medium transition"
                                 :class="form.toilet.type === tType ? 'bg-amber-500 text-white border-amber-500' : 'bg-slate-50 text-slate-700 border-slate-200'">

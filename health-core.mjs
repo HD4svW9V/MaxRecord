@@ -20,6 +20,8 @@ export function prepareFood(input) {
   return d;
 }
 export const dateOf = ts => String(ts || '').slice(0,10);
+export const isPee = type => ['おしっこ', '尿', '両方'].includes(type);
+export const isPoop = type => ['うんち', 'うんこ', '便', '両方'].includes(type);
 export function daily(logs, date) {
   const day = logs.filter(l => dateOf(l.timestamp) === date);
   const dry = logs.filter(l => l.category === 'food' && l.details?.type === 'ドライ' && l.details?.dryAction !== 'serve' && (l.details?.effectiveDate || dateOf(l.timestamp)) === date);
@@ -27,8 +29,8 @@ export function daily(logs, date) {
   return { date, dry: measured.length ? round1(measured.reduce((s,l)=>s+l.details.eatenGrams,0)) : null,
     legacy: dry.filter(l => !l.details?.dryAction).length,
     water: day.filter(l => l.category === 'water').length,
-    pee: day.filter(l => l.category === 'toilet' && ['おしっこ','両方'].includes(l.details?.type)).length,
-    poop: day.filter(l => l.category === 'toilet' && ['うんち','うんこ','両方'].includes(l.details?.type)).length,
+    pee: day.filter(l => l.category === 'toilet' && isPee(l.details?.type)).length,
+    poop: day.filter(l => l.category === 'toilet' && isPoop(l.details?.type)).length,
     symptom: day.filter(l=>l.category==='symptom').length,
     fluid: day.some(l=>l.category==='fluid' && l.details?.hasFluid),
     stimulant: day.some(l=>l.category==='fluid' && l.details?.hasAppetiteStimulant) };
