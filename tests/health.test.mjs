@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
-import {prepareFood,round1,daily,grams} from '../health-core.mjs';
+import {prepareFood,round1,daily,grams,isPee,isPoop} from '../health-core.mjs';
 const food = {type:'ドライ',dryAction:'instant',serveGrams:'３．２',discardGrams:'0.5'};
 test('decimal, full width and invalid amounts',()=>{
  assert.equal(prepareFood(food).eatenGrams,2.7);
@@ -14,14 +14,16 @@ test('discard date and legacy toilet/food data remain meaningful',()=>{
  const logs=[{category:'food',timestamp:'2026-09-11T23:00',details:{type:'ドライ',dryAction:'serve',serveGrams:3}},
  {category:'food',timestamp:'2026-09-12T08:00',details:{type:'ドライ',dryAction:'discard',effectiveDate:'2026-09-12',eatenGrams:2}},
  {category:'food',timestamp:'2026-09-12T09:00',details:{type:'ドライ',amount:'普通'}},
- ...['うんこ','うんち','両方'].map(type=>({category:'toilet',timestamp:'2026-09-12T10:00',details:{type}}))];
+ ...['うんこ','うんち','便','おしっこ','尿','両方'].map(type=>({category:'toilet',timestamp:'2026-09-12T10:00',details:{type}}))];
  assert.equal(daily(logs,'2026-09-11').dry,null);
- assert.deepEqual([daily(logs,'2026-09-12').dry,daily(logs,'2026-09-12').legacy,daily(logs,'2026-09-12').pee,daily(logs,'2026-09-12').poop],[2,1,1,3]);
+ assert.deepEqual([daily(logs,'2026-09-12').dry,daily(logs,'2026-09-12').legacy,daily(logs,'2026-09-12').pee,daily(logs,'2026-09-12').poop],[2,1,3,4]);
+ assert.equal(isPee('両方'), true);
+ assert.equal(isPoop('うんこ'), true);
 });
 function harness(){
  let app, counter=0; const data=new Map(), alerts=[];
  const col={};
- const ctx={prepareFood,round1,daily,grams,console,Date,setInterval:()=>{},alert:m=>alerts.push(m),confirm:()=>true,
+ const ctx={prepareFood,round1,daily,grams,isPee,isPoop,console,Date,setInterval:()=>{},alert:m=>alerts.push(m),confirm:()=>true,
  ref:v=>({value:v}),computed:f=>({get value(){return f()}}),watch:()=>{},nextTick:async()=>{},onMounted:()=>{},
  createApp:obj=>({mount(){app=obj.setup()}}),initializeApp:()=>({}),getAuth:()=>({}),getFirestore:()=>({}),Chart:{register(){}},ChartDataLabels:{},
  collection:()=>col,doc:(c,id)=>({id:id||`test-${++counter}`}),runTransaction:async(db,f)=>{
@@ -53,4 +55,12 @@ test('legacy edit preserves old type and amount; offline never fakes a save',asy
  const old={category:'food',title:'ごはん',timestamp:'2026-09-11T09:00',details:{type:'ドライ',amount:'少なめ',note:'旧記録'}};data.set('old',old);
  a.openEditModal({id:'old',...old});await a.saveLog();assert.equal(data.get('old').details.amount,'少なめ');assert.equal(data.get('old').details.eatenGrams,undefined);
  a.openModal('notice');a.form.value.notice.description='残す';a.isOnline.value=false;await a.saveLog();assert.equal(data.size,1);assert.equal(a.form.value.notice.description,'残す');assert.match(alerts.at(-1),/接続/);
+});
+test('mobile viewport and A4 landscape print contract are present',()=>{
+ const html=fs.readFileSync(new URL('../index.html',import.meta.url),'utf8');
+ assert.match(html,/<meta name="viewport" content="width=device-width, initial-scale=1\.0">/);
+ assert.match(html,/@page \{ size: A4 landscape; margin: 9mm; \}/);
+ assert.match(html,/<svg viewBox="0 0 1160 455"/);
+ assert.match(html,/@media print \{[^}]*\.no-print/s);
+ assert.doesNotMatch(html,/v-for="tType in[^\n]*\['おしっこ', 'うんち', '両方'\]/);
 });
