@@ -50,7 +50,7 @@
 
         const prepareFood = (food) => {
             const res = { ...food };
-            // ごはんの種別は3択に正規化（過去のサプリ・おやつ等は「その他」へ統合）
+            // ごはんの種別を3択に正規化
             if (!['ドライ', 'ウェット', 'その他'].includes(res.type)) {
                 res.type = 'その他';
             }
@@ -75,7 +75,6 @@
                 }
                 res.eatenGrams = round1(res.serveGrams - res.discardGrams);
             } else {
-                // 旧形式データとの後方互換
                 if (res.grams !== undefined && res.grams !== '') {
                     res.grams = grams(res.grams, '食べた量', true);
                 }
@@ -345,7 +344,7 @@
                     editingLogId.value = null;
                 };
 
-                // 配膳中のごはん（全種別：ドライ・ウェット・その他）
+                // 配膳中のごはん（ドライ・ウェット・その他）
                 const activeServes = computed(() => logs.value.filter(l => l.category === 'food' && l.details?.dryAction === 'serve' && !l.details?.isClosed));
                 const filteredLogs = computed(() => logs.value.filter(l => filterCategory.value === 'all' || l.category === filterCategory.value));
 
@@ -528,47 +527,60 @@
                                 return extra ? [dateWithDay, extra] : dateWithDay;
                             }),
                             datasets: [
-                                // ごはん実食：ドライ（鮮明オレンジ）・ウェット（バイオレット）・その他（エメラルド）の積み上げ棒グラフ
+                                // ごはん実食：積み上げ棒グラフ（奥レイヤー order: 2、ソフトトーン）
                                 {
                                     type: 'bar',
                                     label: 'ドライ実食 (g)',
                                     data: weekly.value.map(d => d.food != null ? d.dry : null),
-                                    backgroundColor: '#ea580c',
+                                    backgroundColor: 'rgba(251, 146, 60, 0.65)',
+                                    borderColor: '#fb923c',
+                                    borderWidth: 1,
                                     stack: 'food',
                                     yAxisID: 'grams',
                                     borderRadius: { topLeft: 0, topRight: 0, bottomLeft: 4, bottomRight: 4 },
-                                    borderSkipped: false
+                                    borderSkipped: false,
+                                    order: 2
                                 },
                                 {
                                     type: 'bar',
                                     label: 'ウェット実食 (g)',
                                     data: weekly.value.map(d => d.food != null ? d.wet : null),
-                                    backgroundColor: '#8b5cf6',
+                                    backgroundColor: 'rgba(167, 139, 250, 0.65)',
+                                    borderColor: '#a78bfa',
+                                    borderWidth: 1,
                                     stack: 'food',
                                     yAxisID: 'grams',
-                                    borderSkipped: false
+                                    borderSkipped: false,
+                                    order: 2
                                 },
                                 {
                                     type: 'bar',
                                     label: 'その他実食 (g)',
                                     data: weekly.value.map(d => d.food != null ? d.other : null),
-                                    backgroundColor: '#10b981',
+                                    backgroundColor: 'rgba(52, 211, 153, 0.65)',
+                                    borderColor: '#34d399',
+                                    borderWidth: 1,
                                     stack: 'food',
                                     yAxisID: 'grams',
                                     borderRadius: { topLeft: 4, topRight: 4, bottomLeft: 0, bottomRight: 0 },
-                                    borderSkipped: false
+                                    borderSkipped: false,
+                                    order: 2
                                 },
-                                // 各種ヘルスケア推移：折れ線グラフ
+                                // 折れ線グラフ（手前レイヤー order: 1、白抜きポイント）
                                 ...lineSeries.map(s => ({
                                     type: 'line',
                                     label: s.label,
                                     data: weekly.value.map(d => d[s.key]),
                                     borderColor: s.color,
-                                    backgroundColor: s.color,
+                                    backgroundColor: '#ffffff',
+                                    pointBorderColor: s.color,
+                                    pointBorderWidth: 2,
+                                    borderWidth: 2.5,
                                     yAxisID: 'counts',
                                     tension: 0.15,
-                                    pointRadius: 4,
-                                    pointHoverRadius: 6
+                                    pointRadius: 4.5,
+                                    pointHoverRadius: 6.5,
+                                    order: 1
                                 }))
                             ]
                         },
@@ -903,7 +915,7 @@
                 </button>
             </div>
 
-            <!-- 週間グラフ（ごはん実食積み上げ棒 + 回数折れ線） -->
+            <!-- 週間グラフ（ごはん積み上げ棒 + 回数折れ線） -->
             <section class="bg-white p-4 rounded-2xl border border-slate-100 shadow-sm">
                 <div class="relative h-64">
                     <canvas id="integratedChart"></canvas>
@@ -980,23 +992,23 @@
                 <text x="10" y="28" font-size="12">左軸：ごはん実食 g (棒グラフ)</text><text x="1015" y="28" font-size="12">右軸：回数・件数 (折れ線)</text>
                 <g v-for="n in [0,1,2,3,4]"><line x1="150" x2="1070" :y1="205-n*36.25" :y2="205-n*36.25" stroke="#e2e8f0"/><text x="135" :y="209-n*36.25" text-anchor="end" font-size="10">{{ round1(maxGrams*n/4) }}</text><text x="1080" :y="209-n*36.25" font-size="10">{{ round1(maxCounts*n/4) }}</text></g>
                 
-                <!-- ごはん実食 積み上げ棒グラフ（ドライ=橙, ウェット=紫, その他=緑） -->
+                <!-- ごはん実食 積み上げ棒グラフ（ドライ=薄橙, ウェット=薄紫, その他=薄緑） -->
                 <g v-for="(d, i) in weekly">
                     <template v-if="d.food != null && d.food > 0">
-                        <!-- ドライ (橙) -->
-                        <rect v-if="d.dry > 0" :x="reportX(i) - 14" :y="205 - (d.dry / maxGrams) * 145" width="28" :height="(d.dry / maxGrams) * 145" fill="#ea580c" rx="1"/>
-                        <!-- ウェット (紫) -->
-                        <rect v-if="d.wet > 0" :x="reportX(i) - 14" :y="205 - ((d.dry + d.wet) / maxGrams) * 145" width="28" :height="(d.wet / maxGrams) * 145" fill="#8b5cf6" rx="1"/>
-                        <!-- その他 (緑) -->
-                        <rect v-if="d.other > 0" :x="reportX(i) - 14" :y="205 - ((d.dry + d.wet + d.other) / maxGrams) * 145" width="28" :height="(d.other / maxGrams) * 145" fill="#10b981" rx="1"/>
+                        <!-- ドライ (薄橙) -->
+                        <rect v-if="d.dry > 0" :x="reportX(i) - 14" :y="205 - (d.dry / maxGrams) * 145" width="28" :height="(d.dry / maxGrams) * 145" fill="#fdba74" rx="1"/>
+                        <!-- ウェット (薄紫) -->
+                        <rect v-if="d.wet > 0" :x="reportX(i) - 14" :y="205 - ((d.dry + d.wet) / maxGrams) * 145" width="28" :height="(d.wet / maxGrams) * 145" fill="#c4b5fd" rx="1"/>
+                        <!-- その他 (薄緑) -->
+                        <rect v-if="d.other > 0" :x="reportX(i) - 14" :y="205 - ((d.dry + d.wet + d.other) / maxGrams) * 145" width="28" :height="(d.other / maxGrams) * 145" fill="#6ee7b7" rx="1"/>
                     </template>
                 </g>
 
-                <!-- 折れ線グラフ（水、尿、便、異変） -->
+                <!-- 折れ線グラフ（水、尿、便、異変：手前レイヤー） -->
                 <g v-for="s in lineSeries">
-                    <line v-for="seg in reportSegments(s.key)" :x1="reportX(seg.i)" :x2="reportX(seg.i+1)" :y1="reportY(seg.a,s.key)" :y2="reportY(seg.b,s.key)" :stroke="s.color" stroke-width="2"/>
+                    <line v-for="seg in reportSegments(s.key)" :x1="reportX(seg.i)" :x2="reportX(seg.i+1)" :y1="reportY(seg.a,s.key)" :y2="reportY(seg.b,s.key)" :stroke="s.color" stroke-width="2.5"/>
                     <template v-for="(d,i) in weekly">
-                        <circle v-if="d[s.key]!=null" :cx="reportX(i)" :cy="reportY(d[s.key],s.key)" r="3" :fill="s.color"/>
+                        <circle v-if="d[s.key]!=null" :cx="reportX(i)" :cy="reportY(d[s.key],s.key)" r="3.5" fill="#ffffff" :stroke="s.color" stroke-width="2"/>
                     </template>
                 </g>
 
