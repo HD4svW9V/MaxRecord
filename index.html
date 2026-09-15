@@ -2,13 +2,20 @@
 <html lang="ja">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="default">
+    <meta name="theme-color" content="#92400e">
     <title>マックスの健康日記 🐾</title>
-    <!-- Tailwind CSS -->
+
+    <!-- ファビコン（SVGアイコン） -->
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🐾</text></svg>">
+
+    <!-- Tailwind CSS CDN -->
     <script src="https://cdn.tailwindcss.com"></script>
-    <!-- FontAwesome -->
+    <!-- FontAwesome CDN -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <!-- Chart.js -->
+    <!-- Chart.js CDN -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 
     <script type="module">
@@ -17,7 +24,9 @@
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, collection, addDoc, deleteDoc, updateDoc, doc, onSnapshot, runTransaction } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
-        // ヘルスケア計算ロジック
+        /* ==========================================================================
+           ユーティリティ & 計算ロジック
+           ========================================================================== */
         const round1 = (val) => {
             const num = Number(val);
             if (!Number.isFinite(num)) return 0;
@@ -41,28 +50,32 @@
 
         const prepareFood = (food) => {
             const res = { ...food };
-            if (res.type === 'ドライ') {
-                if (res.dryAction === 'serve') {
+            // ごはんの種別は3択に正規化（過去のサプリ・おやつ等は「その他」へ統合）
+            if (!['ドライ', 'ウェット', 'その他'].includes(res.type)) {
+                res.type = 'その他';
+            }
+
+            if (res.dryAction === 'serve') {
+                res.serveGrams = grams(res.serveGrams, '配膳量');
+                res.isClosed = Boolean(res.isClosed);
+            } else if (res.dryAction === 'discard') {
+                res.discardGrams = grams(res.discardGrams, '廃棄量');
+                if (res.serveGrams !== undefined && res.serveGrams !== '') {
                     res.serveGrams = grams(res.serveGrams, '配膳量');
-                    res.isClosed = Boolean(res.isClosed);
-                } else if (res.dryAction === 'discard') {
-                    res.discardGrams = grams(res.discardGrams, '廃棄量');
-                    if (res.serveGrams !== undefined && res.serveGrams !== '') {
-                        res.serveGrams = grams(res.serveGrams, '配膳量');
-                        if (res.discardGrams > res.serveGrams) {
-                            throw new Error('廃棄量が配膳量を超えています。');
-                        }
-                        res.eatenGrams = round1(res.serveGrams - res.discardGrams);
-                    }
-                } else if (res.dryAction === 'instant') {
-                    res.serveGrams = grams(res.serveGrams, '配膳量');
-                    res.discardGrams = grams(res.discardGrams, '廃棄量');
                     if (res.discardGrams > res.serveGrams) {
                         throw new Error('廃棄量が配膳量を超えています。');
                     }
                     res.eatenGrams = round1(res.serveGrams - res.discardGrams);
                 }
+            } else if (res.dryAction === 'instant') {
+                res.serveGrams = grams(res.serveGrams, '配膳量');
+                res.discardGrams = grams(res.discardGrams, '廃棄量');
+                if (res.discardGrams > res.serveGrams) {
+                    throw new Error('廃棄量が配膳量を超えています。');
+                }
+                res.eatenGrams = round1(res.serveGrams - res.discardGrams);
             } else {
+                // 旧形式データとの後方互換
                 if (res.grams !== undefined && res.grams !== '') {
                     res.grams = grams(res.grams, '食べた量', true);
                 }
@@ -79,19 +92,29 @@
             });
 
             let dryTotal = 0;
-            let hasDryRecord = false;
+            let wetTotal = 0;
+            let otherTotal = 0;
+            let hasFoodRecord = false;
             let legacyCount = 0;
 
             dayLogs.filter(l => l.category === 'food').forEach(l => {
                 const d = l.details || {};
-                if (['discard', 'instant'].includes(d.dryAction) && d.eatenGrams !== undefined) {
-                    dryTotal += Number(d.eatenGrams);
-                    hasDryRecord = true;
-                } else if (d.dryAction === 'legacy' || (!d.dryAction && d.type === 'ドライ')) {
+                if (['discard', 'instant'].includes(d.dryAction) && d.eatenGrams !== undefined && d.eatenGrams !== null) {
+                    const g = Number(d.eatenGrams);
+                    hasFoodRecord = true;
+                    if (d.type === 'ドライ') {
+                        dryTotal += g;
+                    } else if (d.type === 'ウェット') {
+                        wetTotal += g;
+                    } else {
+                        otherTotal += g;
+                    }
+                } else if (d.dryAction === 'legacy' || (!d.dryAction && d.type)) {
                     legacyCount++;
                 }
             });
 
+            const totalFood = hasFoodRecord ? round1(dryTotal + wetTotal + otherTotal) : null;
             const waterLogs = dayLogs.filter(l => l.category === 'water');
             const toiletLogs = dayLogs.filter(l => l.category === 'toilet');
             const peeCount = toiletLogs.filter(l => isPee(l.details?.type)).length;
@@ -105,7 +128,10 @@
 
             return {
                 date: dateStr,
-                dry: hasDryRecord ? round1(dryTotal) : null,
+                food: totalFood,
+                dry: hasFoodRecord ? round1(dryTotal) : 0,
+                wet: hasFoodRecord ? round1(wetTotal) : 0,
+                other: hasFoodRecord ? round1(otherTotal) : 0,
                 legacy: legacyCount,
                 water: waterLogs.length,
                 pee: peeCount,
@@ -116,7 +142,9 @@
             };
         };
 
-        // Firebase設定
+        /* ==========================================================================
+           Firebase 設定 & 定数
+           ========================================================================== */
         const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {
             apiKey: "AIzaSyAwhsXGF-wOUwYxDdNI0t4_YDdkmQ4l7Z4",
             authDomain: "maxrecord.firebaseapp.com",
@@ -126,9 +154,11 @@
             appId: "1:942829666898:web:7cda1423301e3ab35c158b"
         };
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-cat-app';
-
         const WEEKDAYS = ['日', '月', '火', '水', '木', '金', '土'];
 
+        /* ==========================================================================
+           Vue アプリケーション
+           ========================================================================== */
         createApp({
             setup() {
                 const logs = ref([]);
@@ -193,7 +223,7 @@
                             }
                         });
                     } catch (e) {
-                        console.error("認証エラー:", e);
+                        console.error("Firebase Auth Error:", e);
                         syncError.value = "接続できません。再読み込みしてください。";
                     }
                 });
@@ -216,7 +246,7 @@
                             syncError.value = "";
                         }
                     }, (err) => {
-                        console.error("データ取得エラー:", err);
+                        console.error("Firestore Snapshot Error:", err);
                         syncError.value = "取得できません。再読み込みしてください。";
                         isOnline.value = false;
                     });
@@ -275,11 +305,14 @@
                     form.value.timestamp = log.timestamp || getCurrentDateTimeString();
 
                     if (log.category === 'food') {
+                        let t = log.details?.type || 'ドライ';
+                        if (!['ドライ', 'ウェット', 'その他'].includes(t)) t = 'その他';
                         form.value.food = {
                             ...log.details,
-                            type: log.details?.type || 'ドライ',
-                            dryAction: log.details?.dryAction || 'legacy',
-                            amount: log.details?.amount || '普通',
+                            type: t,
+                            dryAction: log.details?.dryAction || 'instant',
+                            serveGrams: log.details?.serveGrams ?? '',
+                            discardGrams: log.details?.discardGrams ?? '',
                             note: log.details?.note || ''
                         };
                     } else if (log.category === 'water') {
@@ -312,12 +345,18 @@
                     editingLogId.value = null;
                 };
 
-                const activeDryServes = computed(() => logs.value.filter(l => l.category === 'food' && l.details?.dryAction === 'serve' && !l.details?.isClosed));
+                // 配膳中のごはん（全種別：ドライ・ウェット・その他）
+                const activeServes = computed(() => logs.value.filter(l => l.category === 'food' && l.details?.dryAction === 'serve' && !l.details?.isClosed));
                 const filteredLogs = computed(() => logs.value.filter(l => filterCategory.value === 'all' || l.category === filterCategory.value));
 
                 const openDiscardModal = (log) => {
                     openModal('food');
-                    Object.assign(form.value.food, { dryAction: 'discard', targetServeLogId: log.id, serveGrams: log.details.serveGrams });
+                    Object.assign(form.value.food, {
+                        type: ['ドライ', 'ウェット', 'その他'].includes(log.details?.type) ? log.details.type : 'ドライ',
+                        dryAction: 'discard',
+                        targetServeLogId: log.id,
+                        serveGrams: log.details?.serveGrams
+                    });
                 };
 
                 const setNowToForm = () => { form.value.timestamp = getCurrentDateTimeString(); };
@@ -425,7 +464,7 @@
                 };
 
                 const categories = [
-                    { id: 'food', label: 'ごはん', icon: '🍚', hint: 'ドライ配膳・廃棄・ウェット', color: '#fed7aa' },
+                    { id: 'food', label: 'ごはん', icon: '🍚', hint: 'ドライ・ウェット・その他の配膳・廃棄', color: '#fed7aa' },
                     { id: 'water', label: '水', icon: '💧', hint: '自発飲水・水分補給', color: '#a5f3fc' },
                     { id: 'toilet', label: 'トイレ', icon: '🚽', hint: '尿・便', color: '#fde68a' },
                     { id: 'fluid', label: '補液等', icon: '💉', hint: '皮下輸液・食欲増進剤', color: '#bae6fd' },
@@ -450,8 +489,11 @@
                 const recentNotes = computed(() => logs.value.filter(l => ['notice', 'symptom'].includes(l.category) && l.timestamp?.slice(0, 10) >= weekly.value[0].date && l.timestamp?.slice(0, 10) <= weekly.value[6].date));
 
                 const selectServe = () => {
-                    const l = activeDryServes.value.find(l => l.id === form.value.food.targetServeLogId);
-                    form.value.food.serveGrams = l?.details?.serveGrams ?? '';
+                    const l = activeServes.value.find(l => l.id === form.value.food.targetServeLogId);
+                    if (l) {
+                        form.value.food.serveGrams = l.details?.serveGrams ?? '';
+                        form.value.food.type = l.details?.type || form.value.food.type;
+                    }
                 };
 
                 const foodPreview = computed(() => {
@@ -463,8 +505,7 @@
                     }
                 });
 
-                const series = [
-                    { key: 'dry', label: 'ドライ実食 (g)', color: '#ea580c' },
+                const lineSeries = [
                     { key: 'water', label: '水 (回)', color: '#0891b2' },
                     { key: 'pee', label: 'おしっこ (回)', color: '#ca8a04' },
                     { key: 'poop', label: 'うんこ (回)', color: '#92400e' },
@@ -480,41 +521,101 @@
 
                     integrated?.destroy();
                     integrated = new Chart(chartCanvas, {
-                        type: 'line',
                         data: {
                             labels: weekly.value.map(d => {
                                 const dateWithDay = formatMMDDDay(d.date);
                                 const extra = `${d.fluid ? '補液 ' : ''}${d.stimulant ? '増進剤' : ''}`.trim();
                                 return extra ? [dateWithDay, extra] : dateWithDay;
                             }),
-                            datasets: series.map(s => ({
-                                label: s.label,
-                                data: weekly.value.map(d => d[s.key]),
-                                borderColor: s.color,
-                                backgroundColor: s.color,
-                                yAxisID: s.key === 'dry' ? 'grams' : 'counts',
-                                spanGaps: false,
-                                tension: 0.15,
-                                pointRadius: 4,
-                                pointHoverRadius: 6
-                            }))
+                            datasets: [
+                                // ごはん実食：ドライ（鮮明オレンジ）・ウェット（バイオレット）・その他（エメラルド）の積み上げ棒グラフ
+                                {
+                                    type: 'bar',
+                                    label: 'ドライ実食 (g)',
+                                    data: weekly.value.map(d => d.food != null ? d.dry : null),
+                                    backgroundColor: '#ea580c',
+                                    stack: 'food',
+                                    yAxisID: 'grams',
+                                    borderRadius: { topLeft: 0, topRight: 0, bottomLeft: 4, bottomRight: 4 },
+                                    borderSkipped: false
+                                },
+                                {
+                                    type: 'bar',
+                                    label: 'ウェット実食 (g)',
+                                    data: weekly.value.map(d => d.food != null ? d.wet : null),
+                                    backgroundColor: '#8b5cf6',
+                                    stack: 'food',
+                                    yAxisID: 'grams',
+                                    borderSkipped: false
+                                },
+                                {
+                                    type: 'bar',
+                                    label: 'その他実食 (g)',
+                                    data: weekly.value.map(d => d.food != null ? d.other : null),
+                                    backgroundColor: '#10b981',
+                                    stack: 'food',
+                                    yAxisID: 'grams',
+                                    borderRadius: { topLeft: 4, topRight: 4, bottomLeft: 0, bottomRight: 0 },
+                                    borderSkipped: false
+                                },
+                                // 各種ヘルスケア推移：折れ線グラフ
+                                ...lineSeries.map(s => ({
+                                    type: 'line',
+                                    label: s.label,
+                                    data: weekly.value.map(d => d[s.key]),
+                                    borderColor: s.color,
+                                    backgroundColor: s.color,
+                                    yAxisID: 'counts',
+                                    tension: 0.15,
+                                    pointRadius: 4,
+                                    pointHoverRadius: 6
+                                }))
+                            ]
                         },
                         options: {
                             responsive: true,
                             maintainAspectRatio: false,
+                            interaction: {
+                                mode: 'index',
+                                intersect: false
+                            },
                             plugins: {
-                                legend: { labels: { boxWidth: 10, font: { size: 10 } } }
+                                legend: { labels: { boxWidth: 10, font: { size: 10 } } },
+                                tooltip: {
+                                    callbacks: {
+                                        footer: (tooltipItems) => {
+                                            let totalFood = 0;
+                                            let hasFood = false;
+                                            tooltipItems.forEach(item => {
+                                                if (['ドライ実食 (g)', 'ウェット実食 (g)', 'その他実食 (g)'].includes(item.dataset.label)) {
+                                                    if (item.raw != null) {
+                                                        totalFood += Number(item.raw);
+                                                        hasFood = true;
+                                                    }
+                                                }
+                                            });
+                                            return hasFood ? `ごはん実食合計: ${round1(totalFood)} g` : '';
+                                        }
+                                    }
+                                }
                             },
                             scales: {
-                                x: { ticks: { font: { size: 10, weight: 'bold' } } },
+                                x: {
+                                    stacked: true,
+                                    ticks: { font: { size: 10, weight: 'bold' } }
+                                },
                                 grams: {
+                                    type: 'linear',
                                     position: 'left',
                                     beginAtZero: true,
+                                    stacked: true,
                                     title: { display: true, text: 'g' }
                                 },
                                 counts: {
+                                    type: 'linear',
                                     position: 'right',
                                     beginAtZero: true,
+                                    stacked: false,
                                     ticks: { precision: 0 },
                                     grid: { drawOnChartArea: false }
                                 }
@@ -523,12 +624,22 @@
                     });
                 }, { deep: true });
 
-                // A4通院レポート印刷用
-                const reportRows = computed(() => [...series, { key: 'legacy', label: '旧ドライ記録 (回)', color: '#64748b' }]);
+                const reportRows = computed(() => [
+                    { key: 'food', label: 'ごはん合計 (g)', color: '#ea580c' },
+                    { key: 'dry', label: '　・ドライ (g)', color: '#ea580c' },
+                    { key: 'wet', label: '　・ウェット (g)', color: '#8b5cf6' },
+                    { key: 'other', label: '　・その他 (g)', color: '#10b981' },
+                    { key: 'water', label: '水 (回)', color: '#0891b2' },
+                    { key: 'pee', label: 'おしっこ (回)', color: '#ca8a04' },
+                    { key: 'poop', label: 'うんこ (回)', color: '#92400e' },
+                    { key: 'symptom', label: '異変 (件)', color: '#e11d48' },
+                    { key: 'legacy', label: '旧記録 (回)', color: '#64748b' }
+                ]);
+
                 const reportX = i => 190 + i * 140;
-                const maxGrams = computed(() => Math.max(5, ...weekly.value.map(d => d.dry || 0)));
+                const maxGrams = computed(() => Math.max(10, ...weekly.value.map(d => d.food || 0)));
                 const maxCounts = computed(() => Math.max(2, ...weekly.value.flatMap(d => [d.water, d.pee, d.poop, d.symptom])));
-                const reportY = (value, key) => 205 - (value / (key === 'dry' ? maxGrams.value : maxCounts.value)) * 145;
+                const reportY = (value, key) => 205 - (value / maxCounts.value) * 145;
                 const reportSegments = key => weekly.value.slice(1).map((d, i) => ({ a: weekly.value[i][key], b: d[key], i })).filter(p => p.a != null && p.b != null);
 
                 const printReport = async () => {
@@ -542,8 +653,8 @@
 
                 return {
                     categories, weekly, todayHealth, recentNotes, selectServe, foodPreview, printReport,
-                    reportRows, series, reportX, reportY, reportSegments, maxGrams, maxCounts,
-                    syncError, bannerNotice, syncedAt, filterCategory, filteredLogs, activeDryServes, openDiscardModal, setNowToForm, round1,
+                    reportRows, lineSeries, reportX, reportY, reportSegments, maxGrams, maxCounts,
+                    syncError, bannerNotice, syncedAt, filterCategory, filteredLogs, activeServes, openDiscardModal, setNowToForm, round1,
                     logs, currentTab, activeCategory, editingLogId, deletingLogId, form, todayStr,
                     isOnline, isSaving, openModal, openEditModal, closeModal, saveLog, executeDeleteLog,
                     formatTime, formatMMDDDay
@@ -553,7 +664,7 @@
     </script>
 </head>
 
-<body class="bg-slate-50 min-h-screen text-slate-800 pb-16">
+<body class="bg-slate-50 min-h-screen text-slate-800 pb-16 antialiased selection:bg-amber-200">
     <div id="app" v-cloak class="max-w-md mx-auto px-4 py-6">
         <!-- 通知バナー -->
         <div v-if="bannerNotice" class="no-print fixed top-4 left-4 right-4 z-50 max-w-md mx-auto bg-slate-900/90 text-white text-xs py-2.5 px-4 rounded-xl shadow-lg flex items-center justify-between transition">
@@ -575,7 +686,7 @@
             </div>
         </header>
 
-        <!-- タブ切り替え（カルテ文言を完全削除） -->
+        <!-- タブ切り替え -->
         <div class="no-print flex bg-slate-200/80 p-1 rounded-2xl mb-6 shadow-inner">
             <button @click="currentTab = 'input'" 
                 class="flex-1 py-2 text-xs font-bold rounded-xl transition flex items-center justify-center gap-1"
@@ -591,13 +702,27 @@
 
         <!-- ================= タブ1: 記録・履歴 ================= -->
         <div v-show="currentTab === 'input'" class="no-print">
-            <!-- 配膳中カード -->
-            <div v-for="serve in activeDryServes" :key="serve.id" class="bg-gradient-to-r from-orange-500 to-amber-500 text-white rounded-2xl p-3 mb-3 flex justify-between items-center gap-2 shadow-sm">
+            <!-- 配膳中カード（種類ごとにカラー連動） -->
+            <div v-for="serve in activeServes" :key="serve.id" 
+                class="text-white rounded-2xl p-3 mb-3 flex justify-between items-center gap-2 shadow-sm transition"
+                :class="{
+                    'bg-gradient-to-r from-orange-500 to-amber-500': !serve.details.type || serve.details.type === 'ドライ',
+                    'bg-gradient-to-r from-violet-600 to-purple-500': serve.details.type === 'ウェット',
+                    'bg-gradient-to-r from-emerald-600 to-teal-500': serve.details.type === 'その他'
+                }">
                 <div>
-                    <strong class="text-xs">🍽️ お皿に出ているドライフード {{ serve.details.serveGrams }}g</strong>
+                    <strong class="text-xs">🍽️ お皿に出ている{{ serve.details.type || 'ごはん' }} {{ serve.details.serveGrams }}g</strong>
                     <p class="text-[10px] opacity-90">配膳: {{ formatTime(serve.timestamp) }} {{ serve.details.note }}</p>
                 </div>
-                <button @click="openDiscardModal(serve)" class="bg-white text-orange-700 rounded-xl px-3 py-1.5 text-xs font-bold shadow-sm active:scale-95 transition">廃棄・計量</button>
+                <button @click="openDiscardModal(serve)" 
+                    class="rounded-xl px-3 py-1.5 text-xs font-bold shadow-sm active:scale-95 transition bg-white"
+                    :class="{
+                        'text-orange-700': !serve.details.type || serve.details.type === 'ドライ',
+                        'text-violet-700': serve.details.type === 'ウェット',
+                        'text-emerald-700': serve.details.type === 'その他'
+                    }">
+                    廃棄・計量
+                </button>
             </div>
 
             <!-- 記録カテゴリボタン一覧 -->
@@ -618,22 +743,32 @@
             <section class="bg-amber-100/60 rounded-2xl p-3.5 mb-6 text-amber-900 border border-amber-200/50">
                 <h2 class="text-xs font-bold uppercase tracking-wider text-amber-700 mb-2">今日の記録まとめ ({{ todayStr }})</h2>
                 <div class="grid grid-cols-4 gap-1.5 text-center text-xs">
-                    <div class="bg-white/80 rounded-lg p-1.5">
-                        <span class="block text-slate-500 text-[10px]">ドライ実食</span>
-                        <span class="text-sm font-bold text-orange-600">{{ todayHealth.dry == null ? '未計量' : todayHealth.dry + ' g' }}</span>
+                    <div class="bg-white/80 rounded-lg p-1.5 flex flex-col justify-between">
+                        <span class="block text-slate-500 text-[10px]">ごはん実食</span>
+                        <div>
+                            <span class="text-sm font-bold text-slate-800">{{ todayHealth.food == null ? '未計量' : todayHealth.food + ' g' }}</span>
+                            <span v-if="todayHealth.food != null" class="block text-[8.5px] leading-tight mt-0.5">
+                                <span class="text-orange-600 font-bold">ド{{ todayHealth.dry }}</span> / 
+                                <span class="text-violet-600 font-bold">ウ{{ todayHealth.wet }}</span> / 
+                                <span class="text-emerald-600 font-bold">他{{ todayHealth.other }}</span>
+                            </span>
+                        </div>
                         <span v-if="todayHealth.legacy" class="block text-[9px] text-slate-400">旧 {{ todayHealth.legacy }}回</span>
                     </div>
-                    <div class="bg-white/80 rounded-lg p-1.5">
+                    <div class="bg-white/80 rounded-lg p-1.5 flex flex-col justify-between">
                         <span class="block text-slate-500 text-[10px]">水</span>
                         <span class="text-sm font-bold text-cyan-600">{{ todayHealth.water }} 回</span>
+                        <span></span>
                     </div>
-                    <div class="bg-white/80 rounded-lg p-1.5">
+                    <div class="bg-white/80 rounded-lg p-1.5 flex flex-col justify-between">
                         <span class="block text-slate-500 text-[10px]">尿 / 便</span>
                         <span class="text-sm font-bold text-amber-600">{{ todayHealth.pee }} / {{ todayHealth.poop }} 回</span>
+                        <span></span>
                     </div>
-                    <div class="bg-white/80 rounded-lg p-1.5">
+                    <div class="bg-white/80 rounded-lg p-1.5 flex flex-col justify-between">
                         <span class="block text-slate-500 text-[10px]">症状</span>
                         <span class="text-sm font-bold text-rose-600">{{ todayHealth.symptom }} 件</span>
+                        <span></span>
                     </div>
                 </div>
             </section>
@@ -689,7 +824,7 @@
                             </div>
 
                             <div v-if="log.category === 'food'" class="text-xs text-slate-700 space-y-0.5">
-                                <p><span class="text-slate-400">種類:</span> <span class="font-semibold">{{ log.details?.type }}</span></p>
+                                <p><span class="text-slate-400">種類:</span> <span class="font-semibold">{{ log.details?.type || 'ドライ' }}</span></p>
                                 <template v-if="log.details?.dryAction">
                                     <p v-if="log.details.dryAction==='serve'" class="font-bold text-orange-600">{{ log.details.serveGrams }}g 配膳（{{ log.details.isClosed ? '回収済' : '配膳中' }}）</p>
                                     <template v-else>
@@ -700,7 +835,7 @@
                                 <p v-else>
                                     <span class="text-slate-400">食べた量:</span> 
                                     <span class="font-bold text-orange-600">{{ log.details?.grams !== undefined && log.details?.grams !== '' ? log.details.grams + 'g' : log.details?.amount }}</span>
-                                    <span v-if="log.details?.type==='ドライ'" class="text-[10px] text-slate-400">（旧記録・量不明）</span>
+                                    <span class="text-[10px] text-slate-400">（旧記録）</span>
                                 </p>
                                 <p v-if="log.details?.note" class="text-slate-500 italic mt-1">「{{ log.details.note }}」</p>
                             </div>
@@ -732,7 +867,7 @@
                                 <p class="text-slate-600 whitespace-pre-wrap bg-slate-50 p-2 rounded-lg">{{ log.details?.description }}</p>
                             </div>
 
-                            <!-- 削除確認バー（インライン表示） -->
+                            <!-- 削除確認バー -->
                             <div v-if="deletingLogId === log.id" class="mt-2.5 p-2.5 bg-rose-50 border border-rose-200 rounded-xl flex items-center justify-between text-xs animate-slide-up">
                                 <span class="text-rose-700 font-bold">この記録を削除しますか？</span>
                                 <div class="flex gap-1.5">
@@ -768,20 +903,20 @@
                 </button>
             </div>
 
-            <!-- 週間グラフ（横軸に曜日必須表示） -->
+            <!-- 週間グラフ（ごはん実食積み上げ棒 + 回数折れ線） -->
             <section class="bg-white p-4 rounded-2xl border border-slate-100 shadow-sm">
                 <div class="relative h-64">
                     <canvas id="integratedChart"></canvas>
                 </div>
             </section>
 
-            <!-- 週間数値表（日付列に曜日必須表示） -->
+            <!-- 週間数値表 -->
             <section class="bg-white p-3.5 rounded-2xl border border-slate-100 shadow-sm overflow-x-auto">
                 <table class="w-full text-[11px] whitespace-nowrap">
                     <thead>
                         <tr class="text-slate-400 border-b border-slate-100">
                             <th class="py-1.5 text-left font-bold">日付 (曜日)</th>
-                            <th class="py-1.5 text-center font-bold">ドライ実食</th>
+                            <th class="py-1.5 text-center font-bold">ごはん実食</th>
                             <th class="py-1.5 text-center font-bold">水</th>
                             <th class="py-1.5 text-center font-bold">尿</th>
                             <th class="py-1.5 text-center font-bold">便</th>
@@ -795,8 +930,16 @@
                                 <span v-if="d.fluid" class="ml-1 text-[10px] bg-sky-100 text-sky-700 px-1 py-0.5 rounded font-bold">補</span>
                                 <span v-if="d.stimulant" class="ml-0.5 text-[10px] bg-emerald-100 text-emerald-700 px-1 py-0.5 rounded font-bold">薬</span>
                             </td>
-                            <td class="py-2.5 text-center font-bold text-orange-600">
-                                {{ d.dry == null ? '—' : d.dry + 'g' }}
+                            <td class="py-2.5 text-center font-bold text-slate-800">
+                                <template v-if="d.food != null">
+                                    {{ d.food }}g
+                                    <span class="text-[9px] font-medium block">
+                                        <span class="text-orange-600">ド{{ d.dry }}</span> / 
+                                        <span class="text-violet-600">ウ{{ d.wet }}</span> / 
+                                        <span class="text-emerald-600">他{{ d.other }}</span>
+                                    </span>
+                                </template>
+                                <span v-else class="text-slate-400 font-normal">—</span>
                                 <span v-if="d.legacy" class="text-[9px] text-slate-400 font-normal block">+旧{{ d.legacy }}回</span>
                             </td>
                             <td class="py-2.5 text-center text-cyan-700 font-semibold">{{ d.water }}回</td>
@@ -809,7 +952,7 @@
                     </tbody>
                 </table>
                 <p class="text-[10px] text-slate-400 mt-2.5 leading-relaxed">
-                    ※ 「—」は実食量の計量記録がない日です。旧記録はグラム数不明のため回数として併記しています。
+                    ※ 「—」は実食量の計量記録がない日です。棒グラフはドライ（橙）・ウェット（紫）・その他（緑）の積み上げです。
                 </p>
             </section>
 
@@ -833,14 +976,34 @@
         <div class="print-only">
             <h2 style="font-size:18px;font-weight:bold;color:#78350f;">マックスの健康日記・通院用レポート</h2>
             <p style="font-size:10px;color:#64748b;margin-bottom:8px;">期間 {{ formatMMDDDay(weekly[0].date) }} ～ {{ formatMMDDDay(weekly[6].date) }} ／ データ取得日時 {{ syncedAt }}</p>
-            <svg viewBox="0 0 1160 455" style="width:100%;height:auto" role="img" aria-label="7日間の推移と日付軸を合わせた数値表">
-                <text x="10" y="28" font-size="12">左軸：ドライ実食 g</text><text x="1015" y="28" font-size="12">右軸：回数・件数</text>
+            <svg viewBox="0 0 1160 520" style="width:100%;height:auto" role="img" aria-label="7日間の推移と日付軸を合わせた数値表">
+                <text x="10" y="28" font-size="12">左軸：ごはん実食 g (棒グラフ)</text><text x="1015" y="28" font-size="12">右軸：回数・件数 (折れ線)</text>
                 <g v-for="n in [0,1,2,3,4]"><line x1="150" x2="1070" :y1="205-n*36.25" :y2="205-n*36.25" stroke="#e2e8f0"/><text x="135" :y="209-n*36.25" text-anchor="end" font-size="10">{{ round1(maxGrams*n/4) }}</text><text x="1080" :y="209-n*36.25" font-size="10">{{ round1(maxCounts*n/4) }}</text></g>
-                <g v-for="s in series"><line v-for="seg in reportSegments(s.key)" :x1="reportX(seg.i)" :x2="reportX(seg.i+1)" :y1="reportY(seg.a,s.key)" :y2="reportY(seg.b,s.key)" :stroke="s.color" stroke-width="2"/><template v-for="(d,i) in weekly"><circle v-if="d[s.key]!=null" :cx="reportX(i)" :cy="reportY(d[s.key],s.key)" r="3" :fill="s.color"/></template></g>
-                <g v-for="(d,i) in weekly"><line :x1="reportX(i)" :x2="reportX(i)" y1="50" y2="440" stroke="#cbd5e1" stroke-dasharray="2 4"/><text :x="reportX(i)" y="231" text-anchor="middle" font-size="12" font-weight="bold">{{ formatMMDDDay(d.date) }}</text><text :x="reportX(i)" y="250" text-anchor="middle" font-size="10">{{ d.fluid?'ⓞ 補液':'' }} {{ d.stimulant?'増進剤':'' }}</text></g>
-                <g v-for="(s,row) in reportRows"><rect x="0" :y="263+row*29" width="1135" height="29" :fill="row%2?'#f8fafc':'#fff'"/><text x="10" :y="282+row*29" :fill="s.color" font-size="12" font-weight="bold">{{ s.label }}</text><text v-for="(d,i) in weekly" :x="reportX(i)" :y="282+row*29" text-anchor="middle" font-size="12">{{ d[s.key]==null?'—':d[s.key] }}</text></g>
+                
+                <!-- ごはん実食 積み上げ棒グラフ（ドライ=橙, ウェット=紫, その他=緑） -->
+                <g v-for="(d, i) in weekly">
+                    <template v-if="d.food != null && d.food > 0">
+                        <!-- ドライ (橙) -->
+                        <rect v-if="d.dry > 0" :x="reportX(i) - 14" :y="205 - (d.dry / maxGrams) * 145" width="28" :height="(d.dry / maxGrams) * 145" fill="#ea580c" rx="1"/>
+                        <!-- ウェット (紫) -->
+                        <rect v-if="d.wet > 0" :x="reportX(i) - 14" :y="205 - ((d.dry + d.wet) / maxGrams) * 145" width="28" :height="(d.wet / maxGrams) * 145" fill="#8b5cf6" rx="1"/>
+                        <!-- その他 (緑) -->
+                        <rect v-if="d.other > 0" :x="reportX(i) - 14" :y="205 - ((d.dry + d.wet + d.other) / maxGrams) * 145" width="28" :height="(d.other / maxGrams) * 145" fill="#10b981" rx="1"/>
+                    </template>
+                </g>
+
+                <!-- 折れ線グラフ（水、尿、便、異変） -->
+                <g v-for="s in lineSeries">
+                    <line v-for="seg in reportSegments(s.key)" :x1="reportX(seg.i)" :x2="reportX(seg.i+1)" :y1="reportY(seg.a,s.key)" :y2="reportY(seg.b,s.key)" :stroke="s.color" stroke-width="2"/>
+                    <template v-for="(d,i) in weekly">
+                        <circle v-if="d[s.key]!=null" :cx="reportX(i)" :cy="reportY(d[s.key],s.key)" r="3" :fill="s.color"/>
+                    </template>
+                </g>
+
+                <g v-for="(d,i) in weekly"><line :x1="reportX(i)" :x2="reportX(i)" y1="50" y2="505" stroke="#cbd5e1" stroke-dasharray="2 4"/><text :x="reportX(i)" y="231" text-anchor="middle" font-size="12" font-weight="bold">{{ formatMMDDDay(d.date) }}</text><text :x="reportX(i)" y="250" text-anchor="middle" font-size="10">{{ d.fluid?'ⓞ 補液':'' }} {{ d.stimulant?'増進剤':'' }}</text></g>
+                <g v-for="(s,row) in reportRows"><rect x="0" :y="263+row*27" width="1135" height="27" :fill="row%2?'#f8fafc':'#fff'"/><text x="10" :y="281+row*27" :fill="s.color" font-size="11" font-weight="bold">{{ s.label }}</text><text v-for="(d,i) in weekly" :x="reportX(i)" :y="281+row*27" text-anchor="middle" font-size="11">{{ d[s.key]==null?'—':d[s.key] }}</text></g>
             </svg>
-            <p style="font-size:10px;color:#64748b;margin-top:6px;">—：計量記録なし。実食量は廃棄日で集計。旧ドライ記録は回数で併記。</p>
+            <p style="font-size:10px;color:#64748b;margin-top:6px;">—：計量記録なし。棒グラフは下からドライ（橙）・ウェット（紫）・その他（緑）の積み上げです。</p>
             <div style="font-size:10px;margin-top:8px">
                 <strong>気付き・異変メモ</strong>
                 <p v-if="!recentNotes.length" style="color:#94a3b8">記録なし</p>
@@ -878,18 +1041,23 @@
                 <div v-if="activeCategory === 'food'" class="space-y-4">
                     <div>
                         <label class="block text-xs font-bold text-slate-600 mb-1.5">ごはんの種類</label>
-                        <div class="grid grid-cols-2 gap-2">
-                            <button v-for="type in ['ドライ', 'ウェット', '水分サプリ', 'おやつ']" :key="type"
+                        <div class="grid grid-cols-3 gap-2">
+                            <button v-for="type in ['ドライ', 'ウェット', 'その他']" :key="type"
                                 type="button" @click="form.food.type = type" :disabled="Boolean(editingLogId)"
-                                class="py-2 px-2 text-xs rounded-xl border font-medium transition"
-                                :class="form.food.type === type ? 'bg-orange-500 text-white border-orange-500 font-bold' : 'bg-slate-50 text-slate-700 border-slate-200'">
+                                class="py-2.5 px-2 text-xs rounded-xl border font-bold transition text-center"
+                                :class="{
+                                    'bg-orange-500 text-white border-orange-500 shadow-sm': form.food.type === type && type === 'ドライ',
+                                    'bg-violet-600 text-white border-violet-600 shadow-sm': form.food.type === type && type === 'ウェット',
+                                    'bg-emerald-600 text-white border-emerald-600 shadow-sm': form.food.type === type && type === 'その他',
+                                    'bg-slate-50 text-slate-700 border-slate-200': form.food.type !== type
+                                }">
                                 {{ type }}
                             </button>
                         </div>
                     </div>
 
-                    <!-- ドライフード：配膳 / 廃棄 / まとめて入力（三択は非表示） -->
-                    <div v-if="form.food.type==='ドライ' && form.food.dryAction!=='legacy'" class="p-3.5 bg-orange-50 rounded-2xl border border-orange-100 space-y-3">
+                    <!-- 配膳 / 廃棄 / まとめて入力 -->
+                    <div class="p-3.5 bg-orange-50 rounded-2xl border border-orange-100 space-y-3">
                         <div class="flex gap-1">
                             <button v-for="action in [{id:'serve',label:'① 配膳'},{id:'discard',label:'② 廃棄'},{id:'instant',label:'まとめて入力'}]" :key="action.id"
                                 :disabled="Boolean(editingLogId)" @click="form.food.dryAction=action.id" 
@@ -902,12 +1070,14 @@
                             <label class="text-xs font-bold text-slate-600">片付ける配膳</label>
                             <select v-model="form.food.targetServeLogId" @change="selectServe" class="w-full rounded-xl border border-orange-200 p-2 text-xs bg-white mt-1">
                                 <option value="">選択してください</option>
-                                <option v-for="serve in activeDryServes" :key="serve.id" :value="serve.id">{{ formatTime(serve.timestamp) }} {{ serve.details.serveGrams }}g {{ serve.details.note }}</option>
+                                <option v-for="serve in activeServes" :key="serve.id" :value="serve.id">
+                                    {{ formatTime(serve.timestamp) }} [{{ serve.details.type || 'ドライ' }}] {{ serve.details.serveGrams }}g {{ serve.details.note }}
+                                </option>
                             </select>
                         </div>
                         <label class="block text-xs font-bold text-slate-700">
                             配膳量 (g)
-                            <input v-model="form.food.serveGrams" :readonly="form.food.dryAction==='discard'" type="text" inputmode="decimal" class="w-full border border-orange-200 rounded-xl p-2.5 mt-1 bg-white" placeholder="例: 3.0">
+                            <input v-model="form.food.serveGrams" :readonly="form.food.dryAction==='discard'" type="text" inputmode="decimal" class="w-full border border-orange-200 rounded-xl p-2.5 mt-1 bg-white" placeholder="例: 10.0">
                         </label>
                         <template v-if="form.food.dryAction!=='serve'">
                             <label class="block text-xs font-bold text-slate-700">
@@ -916,32 +1086,9 @@
                             </label>
                             <div class="p-2.5 bg-white rounded-xl border border-orange-200">
                                 <p class="text-xs font-bold text-orange-700">実食量: {{ foodPreview }}</p>
-                                <p class="text-[10px] text-slate-400 mt-0.5">※廃棄した日時の集計に算入されます</p>
+                                <p class="text-[10px] text-slate-400 mt-0.5">※廃棄日時の集計に算入されます</p>
                             </div>
                         </template>
-                    </div>
-
-                    <!-- ドライフード以外：任意のグラム数 -->
-                    <div v-if="form.food.type!=='ドライ'">
-                        <label class="block text-xs font-bold text-slate-600">食べた量 (g / 任意)
-                            <input v-model="form.food.grams" type="text" inputmode="decimal" class="w-full border border-slate-200 rounded-xl p-2.5 mt-1 focus:outline-none focus:ring-2 focus:ring-amber-400" placeholder="例: 15">
-                        </label>
-                        <div v-if="form.food.type==='おやつ'" class="flex gap-2 mt-2">
-                            <button v-for="g in [1,2,3,5,14]" :key="g" type="button" @click="form.food.grams=g" class="flex-1 border rounded-lg py-1 text-xs bg-slate-50 hover:bg-slate-100 font-bold text-slate-600">{{g}}g</button>
-                        </div>
-                    </div>
-
-                    <!-- ドライフード以外のときのみ食べた量（三択）を表示 -->
-                    <div v-if="form.food.type!=='ドライ'">
-                        <label class="block text-xs font-bold text-slate-600 mb-1.5">食べた量</label>
-                        <div class="grid grid-cols-3 gap-2">
-                            <button v-for="amount in ['多め', '普通', '少なめ']" :key="amount"
-                                type="button" @click="form.food.amount = amount"
-                                class="py-2.5 px-2 text-xs rounded-xl border font-medium transition"
-                                :class="form.food.amount === amount ? 'bg-orange-500 text-white border-orange-500 font-bold' : 'bg-slate-50 text-slate-700 border-slate-200'">
-                                {{ amount }}
-                            </button>
-                        </div>
                     </div>
 
                     <div>
