@@ -48,30 +48,30 @@
         const isPee = (type) => /おしっこ|尿|両方/.test(type || '');
         const isPoop = (type) => /うんち|うんこ|便|両方/.test(type || '');
 
+        // ごはん（器ごと計量）
         const prepareFood = (food) => {
             const res = { ...food };
-            // ごはんの種別を3択に正規化
             if (!['ドライ', 'ウェット', 'その他'].includes(res.type)) {
                 res.type = 'その他';
             }
 
             if (res.dryAction === 'serve') {
-                res.serveGrams = grams(res.serveGrams, '配膳量');
+                res.serveGrams = grams(res.serveGrams, 'セット時の重さ(器込み)');
                 res.isClosed = Boolean(res.isClosed);
             } else if (res.dryAction === 'discard') {
-                res.discardGrams = grams(res.discardGrams, '廃棄量');
+                res.discardGrams = grams(res.discardGrams, '回収時の重さ(器込み)');
                 if (res.serveGrams !== undefined && res.serveGrams !== '') {
-                    res.serveGrams = grams(res.serveGrams, '配膳量');
+                    res.serveGrams = grams(res.serveGrams, 'セット時の重さ(器込み)');
                     if (res.discardGrams > res.serveGrams) {
-                        throw new Error('廃棄量が配膳量を超えています。');
+                        throw new Error('回収時の重さがセット時を超えています。入力値を確認してください。');
                     }
                     res.eatenGrams = round1(res.serveGrams - res.discardGrams);
                 }
             } else if (res.dryAction === 'instant') {
-                res.serveGrams = grams(res.serveGrams, '配膳量');
-                res.discardGrams = grams(res.discardGrams, '廃棄量');
+                res.serveGrams = grams(res.serveGrams, 'セット時の重さ(器込み)');
+                res.discardGrams = grams(res.discardGrams, '回収時の重さ(器込み)');
                 if (res.discardGrams > res.serveGrams) {
-                    throw new Error('廃棄量が配膳量を超えています。');
+                    throw new Error('回収時の重さがセット時を超えています。入力値を確認してください。');
                 }
                 res.eatenGrams = round1(res.serveGrams - res.discardGrams);
             } else {
@@ -82,11 +82,45 @@
             return res;
         };
 
+        // お水（器ごと計量：重さ g で集計）
+        const prepareWater = (water) => {
+            const res = { ...water };
+            if (res.waterAction === 'serve') {
+                res.serveMl = grams(res.serveMl, 'セット時の重さ(器込み)');
+                res.isClosed = Boolean(res.isClosed);
+            } else if (res.waterAction === 'discard') {
+                res.discardMl = grams(res.discardMl, '回収時の重さ(器込み)');
+                if (res.serveMl !== undefined && res.serveMl !== '') {
+                    res.serveMl = grams(res.serveMl, 'セット時の重さ(器込み)');
+                    if (res.discardMl > res.serveMl) {
+                        throw new Error('回収時の重さがセット時を超えています。入力値を確認してください。');
+                    }
+                    res.drunkMl = round1(res.serveMl - res.discardMl);
+                }
+            } else if (res.waterAction === 'instant') {
+                res.serveMl = grams(res.serveMl, 'セット時の重さ(器込み)');
+                res.discardMl = grams(res.discardMl, '回収時の重さ(器込み)');
+                if (res.discardMl > res.serveMl) {
+                    throw new Error('回収時の重さがセット時を超えています。入力値を確認してください。');
+                }
+                res.drunkMl = round1(res.serveMl - res.discardMl);
+            } else {
+                // 旧記録（直接入力）
+                if (res.ml !== undefined && res.ml !== '') {
+                    res.ml = grams(res.ml, '飲水量 (g)', true);
+                }
+            }
+            return res;
+        };
+
         const daily = (logs, dateStr) => {
             const dayLogs = logs.filter(l => {
-                const effectiveDate = l.category === 'food' && ['instant', 'discard'].includes(l.details?.dryAction)
-                    ? (l.details?.effectiveDate || l.timestamp?.slice(0, 10))
-                    : l.timestamp?.slice(0, 10);
+                let effectiveDate = l.timestamp?.slice(0, 10);
+                if (l.category === 'food' && ['instant', 'discard'].includes(l.details?.dryAction)) {
+                    effectiveDate = l.details?.effectiveDate || effectiveDate;
+                } else if (l.category === 'water' && ['instant', 'discard'].includes(l.details?.waterAction)) {
+                    effectiveDate = l.details?.effectiveDate || effectiveDate;
+                }
                 return effectiveDate === dateStr;
             });
 
@@ -113,8 +147,27 @@
                 }
             });
 
-            const totalFood = hasFoodRecord ? round1(dryTotal + wetTotal + otherTotal) : null;
+            // 水の集計（実飲水量 g のみ集計。回数はカウントしない）
+            let waterMlTotal = 0;
+            let hasWaterRecord = false;
+            let waterLegacyCount = 0;
             const waterLogs = dayLogs.filter(l => l.category === 'water');
+
+            waterLogs.forEach(l => {
+                const d = l.details || {};
+                if (['discard', 'instant'].includes(d.waterAction) && d.drunkMl !== undefined && d.drunkMl !== null) {
+                    waterMlTotal += Number(d.drunkMl);
+                    hasWaterRecord = true;
+                } else if (d.ml !== undefined && d.ml !== '' && !d.waterAction) {
+                    waterMlTotal += Number(d.ml);
+                    hasWaterRecord = true;
+                    waterLegacyCount++;
+                }
+            });
+
+            const totalFood = hasFoodRecord ? round1(dryTotal + wetTotal + otherTotal) : null;
+            const totalWater = hasWaterRecord ? round1(waterMlTotal) : null;
+
             const toiletLogs = dayLogs.filter(l => l.category === 'toilet');
             const peeCount = toiletLogs.filter(l => isPee(l.details?.type)).length;
             const poopCount = toiletLogs.filter(l => isPoop(l.details?.type)).length;
@@ -132,7 +185,8 @@
                 wet: hasFoodRecord ? round1(wetTotal) : 0,
                 other: hasFoodRecord ? round1(otherTotal) : 0,
                 legacy: legacyCount,
-                water: waterLogs.length,
+                waterMl: totalWater,
+                waterLegacy: waterLegacyCount,
                 pee: peeCount,
                 poop: poopCount,
                 fluid: hasFluid,
@@ -178,7 +232,8 @@
                 let db = null;
                 let unsubscribeFirestore = null;
 
-                const notify = (msg, duration = 3000) => {
+                // 保存後の完了メッセージはテンポよく短め（1.5秒）に表示
+                const notify = (msg, duration = 1500) => {
                     bannerNotice.value = msg;
                     setTimeout(() => {
                         if (bannerNotice.value === msg) bannerNotice.value = '';
@@ -187,8 +242,8 @@
 
                 const form = ref({
                     timestamp: '',
-                    food: { type: 'ドライ', amount: '普通', note: '', dryAction: 'serve', serveGrams: '', discardGrams: '', grams: '', targetServeLogId: '' },
-                    water: { amount: '普通', ml: '', note: '' },
+                    food: { type: 'ドライ', note: '', dryAction: 'serve', serveGrams: '', discardGrams: '', grams: '', targetServeLogId: '' },
+                    water: { waterAction: 'serve', serveMl: '', discardMl: '', drunkMl: '', targetServeLogId: '', ml: '', note: '' },
                     toilet: { type: 'おしっこ', amount: '普通', note: '' },
                     fluid: { hasFluid: true, hasAppetiteStimulant: false, note: '' },
                     notice: { description: '' },
@@ -289,8 +344,8 @@
                     deletingLogId.value = null;
                     activeCategory.value = category;
                     form.value.timestamp = getCurrentDateTimeString();
-                    form.value.food = { type: 'ドライ', amount: '普通', note: '', dryAction: 'serve', serveGrams: '', discardGrams: '', grams: '', targetServeLogId: '' };
-                    form.value.water = { amount: '普通', ml: '', note: '' };
+                    form.value.food = { type: 'ドライ', note: '', dryAction: 'serve', serveGrams: '', discardGrams: '', grams: '', targetServeLogId: '' };
+                    form.value.water = { waterAction: 'serve', serveMl: '', discardMl: '', drunkMl: '', targetServeLogId: '', ml: '', note: '' };
                     form.value.toilet = { type: 'おしっこ', amount: '普通', note: '' };
                     form.value.fluid = { hasFluid: true, hasAppetiteStimulant: false, note: '' };
                     form.value.notice = { description: '' };
@@ -315,11 +370,23 @@
                             note: log.details?.note || ''
                         };
                     } else if (log.category === 'water') {
-                        form.value.water = {
-                            ml: log.details?.ml ?? '',
-                            amount: log.details?.amount || '普通',
-                            note: log.details?.note || ''
-                        };
+                        if (log.details?.waterAction) {
+                            form.value.water = {
+                                ...log.details,
+                                waterAction: log.details.waterAction,
+                                serveMl: log.details?.serveMl ?? '',
+                                discardMl: log.details?.discardMl ?? '',
+                                targetServeLogId: log.details?.targetServeLogId || '',
+                                note: log.details?.note || ''
+                            };
+                        } else {
+                            // 旧記録形式のフォールバック
+                            form.value.water = {
+                                waterAction: 'legacy',
+                                ml: log.details?.ml ?? '',
+                                note: log.details?.note || ''
+                            };
+                        }
                     } else if (log.category === 'toilet') {
                         form.value.toilet = {
                             type: log.details?.type || 'おしっこ',
@@ -344,10 +411,11 @@
                     editingLogId.value = null;
                 };
 
-                // 配膳中のごはん（ドライ・ウェット・その他）
                 const activeServes = computed(() => logs.value.filter(l => l.category === 'food' && l.details?.dryAction === 'serve' && !l.details?.isClosed));
+                const activeWaterServes = computed(() => logs.value.filter(l => l.category === 'water' && l.details?.waterAction === 'serve' && !l.details?.isClosed));
                 const filteredLogs = computed(() => logs.value.filter(l => filterCategory.value === 'all' || l.category === filterCategory.value));
 
+                // 配膳中のごはんを回収・計量
                 const openDiscardModal = (log) => {
                     openModal('food');
                     Object.assign(form.value.food, {
@@ -358,13 +426,25 @@
                     });
                 };
 
+                // 給水中の水を回収・計量
+                const openDiscardWaterModal = (log) => {
+                    openModal('water');
+                    Object.assign(form.value.water, {
+                        waterAction: 'discard',
+                        targetServeLogId: log.id,
+                        serveMl: log.details?.serveMl,
+                        discardMl: '',
+                        note: ''
+                    });
+                };
+
                 const setNowToForm = () => { form.value.timestamp = getCurrentDateTimeString(); };
                 const labels = { food: 'ごはん', water: '水', toilet: 'トイレ', fluid: '補液等', symptom: '異変', notice: '気付きメモ' };
 
                 const saveLog = async () => {
                     if (isSaving.value) return;
                     if (!isOnline.value || !currentUser.value) {
-                        notify('サーバーへの接続を確認してから保存してください。入力内容は残っています。');
+                        notify('サーバーへの接続を確認してから保存してください。入力内容は残っています。', 2500);
                         return;
                     }
                     isSaving.value = true;
@@ -373,9 +453,14 @@
                         const timestamp = form.value.timestamp;
                         if (!timestamp || !Number.isFinite(new Date(timestamp).getTime())) throw new Error('記録日時を入力してください。');
 
-                        const details = category === 'food' ? prepareFood(form.value.food) : { ...form.value[category] };
-                        if (category === 'water') details.ml = grams(details.ml, '飲水量', true);
+                        const details = category === 'food' 
+                            ? prepareFood(form.value.food) 
+                            : category === 'water' 
+                            ? prepareWater(form.value.water) 
+                            : { ...form.value[category] };
+
                         if (category === 'food' && ['instant', 'discard'].includes(details.dryAction)) details.effectiveDate = timestamp.slice(0, 10);
+                        if (category === 'water' && ['instant', 'discard'].includes(details.waterAction)) details.effectiveDate = timestamp.slice(0, 10);
                         if (category === 'fluid' && !details.hasFluid && !details.hasAppetiteStimulant && !details.note?.trim()) throw new Error('補液・食欲増進剤・メモのいずれかを入力してください。');
                         if (category === 'notice' && !details.description?.trim()) throw new Error('気付きメモを入力してください。');
 
@@ -392,36 +477,58 @@
                             const d = { ...(old?.details || {}), ...details };
 
                             if (old?.details?.dryAction && (old.details.dryAction !== d.dryAction || old.details.type !== d.type)) {
-                                throw new Error('配膳・廃棄の記録方法は編集で変更できません。');
+                                throw new Error('セット・回収の記録方法は編集で変更できません。');
+                            }
+                            if (old?.details?.waterAction && old.details.waterAction !== d.waterAction) {
+                                throw new Error('セット・回収の記録方法は編集で変更できません。');
                             }
                             if (old?.details?.isClosed && d.dryAction === 'serve') {
-                                throw new Error('回収済みの配膳は編集できません。先に対応する廃棄記録を削除してください。');
+                                throw new Error('回収済みの記録は編集できません。先に対応する回収・計量記録を削除してください。');
+                            }
+                            if (old?.details?.isClosed && d.waterAction === 'serve') {
+                                throw new Error('回収済みの記録は編集できません。先に対応する回収・計量記録を削除してください。');
                             }
 
-                            let targetRef = null;
+                            let targetFoodRef = null;
                             if (category === 'food' && d.dryAction === 'discard') {
-                                if (!d.targetServeLogId) throw new Error('配膳中のカードから廃棄を記録してください。');
-                                targetRef = doc(col, d.targetServeLogId);
-                                const snap = await tx.get(targetRef);
-                                if (!snap.exists()) throw new Error('対応する配膳記録がありません。');
+                                if (!d.targetServeLogId) throw new Error('配膳中のカードから回収・計量を記録してください。');
+                                targetFoodRef = doc(col, d.targetServeLogId);
+                                const snap = await tx.get(targetFoodRef);
+                                if (!snap.exists()) throw new Error('対応するセット記録がありません。');
                                 const target = snap.data();
                                 if (target.details?.isClosed && target.details?.closedBy !== targetDocRef.id) {
                                     throw new Error('この配膳はすでに回収済みです。');
                                 }
                                 d.serveGrams = target.details?.serveGrams;
-                                if (d.discardGrams > d.serveGrams) throw new Error('廃棄量が配膳量を超えています。');
+                                if (d.discardGrams > d.serveGrams) throw new Error('回収時の重さがセット時を超えています。');
                                 d.eatenGrams = round1(d.serveGrams - d.discardGrams);
                             }
 
+                            let targetWaterRef = null;
+                            if (category === 'water' && d.waterAction === 'discard') {
+                                if (!d.targetServeLogId) throw new Error('給水中のカードから回収・計量を記録してください。');
+                                targetWaterRef = doc(col, d.targetServeLogId);
+                                const snap = await tx.get(targetWaterRef);
+                                if (!snap.exists()) throw new Error('対応するセット記録がありません。');
+                                const target = snap.data();
+                                if (target.details?.isClosed && target.details?.closedBy !== targetDocRef.id) {
+                                    throw new Error('この給水はすでに回収済みです。');
+                                }
+                                d.serveMl = target.details?.serveMl;
+                                if (d.discardMl > d.serveMl) throw new Error('回収時の重さがセット時を超えています。');
+                                d.drunkMl = round1(d.serveMl - d.discardMl);
+                            }
+
                             tx.set(targetDocRef, { ...(old || {}), category, title: labels[category], timestamp, details: d, updatedAt: now, createdAt: old?.createdAt || now });
-                            if (targetRef) tx.update(targetRef, { 'details.isClosed': true, 'details.closedBy': targetDocRef.id, updatedAt: now });
+                            if (targetFoodRef) tx.update(targetFoodRef, { 'details.isClosed': true, 'details.closedBy': targetDocRef.id, updatedAt: now });
+                            if (targetWaterRef) tx.update(targetWaterRef, { 'details.isClosed': true, 'details.closedBy': targetDocRef.id, updatedAt: now });
                         });
 
                         activeCategory.value = null;
                         editingLogId.value = null;
                         notify('記録を保存しました ✨');
                     } catch (e) {
-                        notify(e.message || '保存できませんでした。入力内容は残っています。');
+                        notify(e.message || '保存できませんでした。入力内容は残っています。', 2500);
                     } finally {
                         isSaving.value = false;
                     }
@@ -429,7 +536,7 @@
 
                 const executeDeleteLog = async (id) => {
                     if (isSaving.value || !isOnline.value) {
-                        notify('接続を確認してから操作してください。');
+                        notify('接続を確認してから操作してください。', 2000);
                         return;
                     }
                     isSaving.value = true;
@@ -440,15 +547,21 @@
                             const snap = await tx.get(ref);
                             if (!snap.exists()) return;
                             const d = snap.data().details || {};
-                            if (d.dryAction === 'serve' && d.isClosed) {
-                                throw new Error('回収済みです。先に対応する廃棄記録を削除してください。');
+                            if ((d.dryAction === 'serve' || d.waterAction === 'serve') && d.isClosed) {
+                                throw new Error('回収済みです。先に対応する回収・計量記録を削除してください。');
                             }
-                            let targetRef = null;
                             if (d.dryAction === 'discard' && d.targetServeLogId) {
-                                targetRef = doc(col, d.targetServeLogId);
+                                const targetRef = doc(col, d.targetServeLogId);
                                 const targetSnap = await tx.get(targetRef);
                                 if (targetSnap.exists() && targetSnap.data().details?.closedBy === id) {
                                     tx.update(targetRef, { 'details.isClosed': false, 'details.closedBy': '', updatedAt: new Date().toISOString() });
+                                }
+                            }
+                            if (d.waterAction === 'discard' && d.targetServeLogId) {
+                                const targetWaterRef = doc(col, d.targetServeLogId);
+                                const targetSnap = await tx.get(targetWaterRef);
+                                if (targetSnap.exists() && targetSnap.data().details?.closedBy === id) {
+                                    tx.update(targetWaterRef, { 'details.isClosed': false, 'details.closedBy': '', updatedAt: new Date().toISOString() });
                                 }
                             }
                             tx.delete(ref);
@@ -456,15 +569,15 @@
                         deletingLogId.value = null;
                         notify('記録を削除しました。');
                     } catch (e) {
-                        notify(e.message || '削除できませんでした。');
+                        notify(e.message || '削除できませんでした。', 2500);
                     } finally {
                         isSaving.value = false;
                     }
                 };
 
                 const categories = [
-                    { id: 'food', label: 'ごはん', icon: '🍚', hint: 'ドライ・ウェット・その他の配膳・廃棄', color: '#fed7aa' },
-                    { id: 'water', label: '水', icon: '💧', hint: '自発飲水・水分補給', color: '#a5f3fc' },
+                    { id: 'food', label: 'ごはん', icon: '🍚', hint: '器ごと計量（ドライ・ウェット・その他）', color: '#fed7aa' },
+                    { id: 'water', label: '水', icon: '💧', hint: '器ごと計量（実飲水量を差分で算出）', color: '#a5f3fc' },
                     { id: 'toilet', label: 'トイレ', icon: '🚽', hint: '尿・便', color: '#fde68a' },
                     { id: 'fluid', label: '補液等', icon: '💉', hint: '皮下輸液・食欲増進剤', color: '#bae6fd' },
                     { id: 'symptom', label: '異変', icon: '⚠️', hint: '嘔吐（ごはん・毛玉・胃液等）', color: '#fecdd3' },
@@ -495,17 +608,33 @@
                     }
                 };
 
+                const selectWaterServe = () => {
+                    const l = activeWaterServes.value.find(l => l.id === form.value.water.targetServeLogId);
+                    if (l) {
+                        form.value.water.serveMl = l.details?.serveMl ?? '';
+                    }
+                };
+
                 const foodPreview = computed(() => {
                     try {
                         const d = prepareFood(form.value.food);
                         return d.eatenGrams === undefined ? '—' : `${d.eatenGrams} g`;
                     } catch {
-                        return '配膳量・廃棄量を確認してください';
+                        return '入力値を確認してください';
                     }
                 });
 
-                const lineSeries = [
-                    { key: 'water', label: '水 (回)', color: '#0891b2' },
+                const waterPreview = computed(() => {
+                    try {
+                        const d = prepareWater(form.value.water);
+                        return d.drunkMl === undefined ? '—' : `${d.drunkMl} g`;
+                    } catch {
+                        return '入力値を確認してください';
+                    }
+                });
+
+                // トイレ・異変（右軸の回数系）
+                const countSeries = [
                     { key: 'pee', label: 'おしっこ (回)', color: '#ca8a04' },
                     { key: 'poop', label: 'うんこ (回)', color: '#92400e' },
                     { key: 'symptom', label: '異変 (件)', color: '#e11d48' }
@@ -527,7 +656,7 @@
                                 return extra ? [dateWithDay, extra] : dateWithDay;
                             }),
                             datasets: [
-                                // ごはん実食：積み上げ棒グラフ（奥レイヤー order: 2、ソフトトーン）
+                                // ごはん実食：積み上げ棒グラフ（左軸 grams: g）
                                 {
                                     type: 'bar',
                                     label: 'ドライ実食 (g)',
@@ -566,8 +695,25 @@
                                     borderSkipped: false,
                                     order: 2
                                 },
-                                // 折れ線グラフ（手前レイヤー order: 1、白抜きポイント）
-                                ...lineSeries.map(s => ({
+                                // 水実飲水量 (g) - 左軸に折れ線（シアン・点線）でオーバーレイ
+                                {
+                                    type: 'line',
+                                    label: '水 実飲水量 (g)',
+                                    data: weekly.value.map(d => d.waterMl),
+                                    borderColor: '#06b6d4',
+                                    backgroundColor: '#ffffff',
+                                    pointBorderColor: '#0891b2',
+                                    pointBorderWidth: 2,
+                                    borderWidth: 2.5,
+                                    borderDash: [4, 4],
+                                    yAxisID: 'grams',
+                                    tension: 0.2,
+                                    pointRadius: 4.5,
+                                    pointHoverRadius: 6.5,
+                                    order: 1
+                                },
+                                // 回数系折れ線グラフ（右軸 counts: トイレ・異変）
+                                ...countSeries.map(s => ({
                                     type: 'line',
                                     label: s.label,
                                     data: weekly.value.map(d => d[s.key]),
@@ -629,7 +775,8 @@
                                     beginAtZero: true,
                                     stacked: false,
                                     ticks: { precision: 0 },
-                                    grid: { drawOnChartArea: false }
+                                    grid: { drawOnChartArea: false },
+                                    title: { display: true, text: '回・件' }
                                 }
                             }
                         }
@@ -641,7 +788,7 @@
                     { key: 'dry', label: '　・ドライ (g)', color: '#ea580c' },
                     { key: 'wet', label: '　・ウェット (g)', color: '#8b5cf6' },
                     { key: 'other', label: '　・その他 (g)', color: '#10b981' },
-                    { key: 'water', label: '水 (回)', color: '#0891b2' },
+                    { key: 'waterMl', label: '水 実飲水量 (g)', color: '#0891b2' },
                     { key: 'pee', label: 'おしっこ (回)', color: '#ca8a04' },
                     { key: 'poop', label: 'うんこ (回)', color: '#92400e' },
                     { key: 'symptom', label: '異変 (件)', color: '#e11d48' },
@@ -649,14 +796,16 @@
                 ]);
 
                 const reportX = i => 190 + i * 140;
-                const maxGrams = computed(() => Math.max(10, ...weekly.value.map(d => d.food || 0)));
-                const maxCounts = computed(() => Math.max(2, ...weekly.value.flatMap(d => [d.water, d.pee, d.poop, d.symptom])));
+                const maxGrams = computed(() => Math.max(10, ...weekly.value.map(d => Math.max(d.food || 0, d.waterMl || 0))));
+                const maxCounts = computed(() => Math.max(2, ...weekly.value.flatMap(d => [d.pee, d.poop, d.symptom])));
                 const reportY = (value, key) => 205 - (value / maxCounts.value) * 145;
+                const reportYWater = (value) => 205 - ((value || 0) / maxGrams.value) * 145;
                 const reportSegments = key => weekly.value.slice(1).map((d, i) => ({ a: weekly.value[i][key], b: d[key], i })).filter(p => p.a != null && p.b != null);
+                const reportWaterSegments = () => weekly.value.slice(1).map((d, i) => ({ a: weekly.value[i].waterMl, b: d.waterMl, i })).filter(p => p.a != null && p.b != null);
 
                 const printReport = async () => {
                     if (!isOnline.value || !syncedAt.value) {
-                        notify('最新データの取得後に印刷してください。');
+                        notify('最新データの取得後に印刷してください。', 2000);
                         return;
                     }
                     await nextTick();
@@ -664,9 +813,10 @@
                 };
 
                 return {
-                    categories, weekly, todayHealth, recentNotes, selectServe, foodPreview, printReport,
-                    reportRows, lineSeries, reportX, reportY, reportSegments, maxGrams, maxCounts,
-                    syncError, bannerNotice, syncedAt, filterCategory, filteredLogs, activeServes, openDiscardModal, setNowToForm, round1,
+                    categories, weekly, todayHealth, recentNotes, selectServe, selectWaterServe, foodPreview, waterPreview, printReport,
+                    reportRows, countSeries, reportX, reportY, reportYWater, reportSegments, reportWaterSegments, maxGrams, maxCounts,
+                    syncError, bannerNotice, syncedAt, filterCategory, filteredLogs, activeServes, activeWaterServes,
+                    openDiscardModal, openDiscardWaterModal, setNowToForm, round1,
                     logs, currentTab, activeCategory, editingLogId, deletingLogId, form, todayStr,
                     isOnline, isSaving, openModal, openEditModal, closeModal, saveLog, executeDeleteLog,
                     formatTime, formatMMDDDay
@@ -678,10 +828,13 @@
 
 <body class="bg-slate-50 min-h-screen text-slate-800 pb-16 antialiased selection:bg-amber-200">
     <div id="app" v-cloak class="max-w-md mx-auto px-4 py-6">
-        <!-- 通知バナー -->
-        <div v-if="bannerNotice" class="no-print fixed top-4 left-4 right-4 z-50 max-w-md mx-auto bg-slate-900/90 text-white text-xs py-2.5 px-4 rounded-xl shadow-lg flex items-center justify-between transition">
-            <span>{{ bannerNotice }}</span>
-            <button @click="bannerNotice = ''" class="ml-2 text-slate-400 hover:text-white"><i class="fa-solid fa-xmark"></i></button>
+        <!-- 通知バナー（短時間表示: 1.5秒） -->
+        <div v-if="bannerNotice" class="no-print fixed top-4 left-4 right-4 z-50 max-w-md mx-auto bg-slate-900/90 text-white text-xs py-2 px-3.5 rounded-xl shadow-lg flex items-center justify-between transition animate-slide-up">
+            <div class="flex items-center gap-2">
+                <i class="fa-solid fa-circle-check text-emerald-400"></i>
+                <span>{{ bannerNotice }}</span>
+            </div>
+            <button @click="bannerNotice = ''" class="ml-2 text-slate-400 hover:text-white p-0.5"><i class="fa-solid fa-xmark"></i></button>
         </div>
 
         <!-- ヘッダー -->
@@ -699,7 +852,7 @@
         </header>
 
         <!-- タブ切り替え -->
-        <div class="no-print flex bg-slate-200/80 p-1 rounded-2xl mb-6 shadow-inner">
+        <div class="no-print flex bg-slate-200/80 p-1 rounded-2xl mb-5 shadow-inner">
             <button @click="currentTab = 'input'" 
                 class="flex-1 py-2 text-xs font-bold rounded-xl transition flex items-center justify-center gap-1"
                 :class="currentTab === 'input' ? 'bg-white text-amber-800 shadow-sm' : 'text-slate-600 hover:text-slate-800'">
@@ -714,26 +867,45 @@
 
         <!-- ================= タブ1: 記録・履歴 ================= -->
         <div v-show="currentTab === 'input'" class="no-print">
-            <!-- 配膳中カード（種類ごとにカラー連動） -->
+            <!-- 【スリム化】配膳中ごはんカード -->
             <div v-for="serve in activeServes" :key="serve.id" 
-                class="text-white rounded-2xl p-3 mb-3 flex justify-between items-center gap-2 shadow-sm transition"
+                class="text-white rounded-xl py-2 px-3 mb-2 flex justify-between items-center gap-2 shadow-sm transition"
                 :class="{
                     'bg-gradient-to-r from-orange-500 to-amber-500': !serve.details.type || serve.details.type === 'ドライ',
                     'bg-gradient-to-r from-violet-600 to-purple-500': serve.details.type === 'ウェット',
                     'bg-gradient-to-r from-emerald-600 to-teal-500': serve.details.type === 'その他'
                 }">
-                <div>
-                    <strong class="text-xs">🍽️ お皿に出ている{{ serve.details.type || 'ごはん' }} {{ serve.details.serveGrams }}g</strong>
-                    <p class="text-[10px] opacity-90">配膳: {{ formatTime(serve.timestamp) }} {{ serve.details.note }}</p>
+                <div class="min-w-0 flex-1">
+                    <div class="flex items-center gap-1.5 flex-wrap">
+                        <strong class="text-xs font-bold whitespace-nowrap">🍽️ {{ serve.details.type || 'ごはん' }}配膳中</strong>
+                        <span class="text-[11px] font-semibold bg-black/15 px-1.5 py-0.2 rounded">器込 {{ serve.details.serveGrams }}g</span>
+                    </div>
+                    <p class="text-[10px] opacity-90 truncate mt-0.5">セット: {{ formatTime(serve.timestamp) }} <span v-if="serve.details.note">・{{ serve.details.note }}</span></p>
                 </div>
                 <button @click="openDiscardModal(serve)" 
-                    class="rounded-xl px-3 py-1.5 text-xs font-bold shadow-sm active:scale-95 transition bg-white"
+                    class="shrink-0 rounded-lg px-2.5 py-1 text-xs font-bold shadow-sm active:scale-95 transition bg-white"
                     :class="{
                         'text-orange-700': !serve.details.type || serve.details.type === 'ドライ',
                         'text-violet-700': serve.details.type === 'ウェット',
                         'text-emerald-700': serve.details.type === 'その他'
                     }">
-                    廃棄・計量
+                    回収・計量
+                </button>
+            </div>
+
+            <!-- 【スリム化】給水中カード（水入れ） -->
+            <div v-for="wServe in activeWaterServes" :key="wServe.id" 
+                class="text-white rounded-xl py-2 px-3 mb-2.5 flex justify-between items-center gap-2 shadow-sm transition bg-gradient-to-r from-cyan-600 to-sky-500">
+                <div class="min-w-0 flex-1">
+                    <div class="flex items-center gap-1.5 flex-wrap">
+                        <strong class="text-xs font-bold whitespace-nowrap">💧 お水給水中</strong>
+                        <span class="text-[11px] font-semibold bg-black/15 px-1.5 py-0.2 rounded">器込 {{ wServe.details.serveMl }}g</span>
+                    </div>
+                    <p class="text-[10px] opacity-90 truncate mt-0.5">セット: {{ formatTime(wServe.timestamp) }} <span v-if="wServe.details.note">・{{ wServe.details.note }}</span></p>
+                </div>
+                <button @click="openDiscardWaterModal(wServe)" 
+                    class="shrink-0 rounded-lg px-2.5 py-1 text-xs font-bold shadow-sm active:scale-95 transition bg-white text-cyan-700">
+                    回収・計量
                 </button>
             </div>
 
@@ -751,7 +923,7 @@
                 </button>
             </div>
 
-            <!-- 今日の記録まとめ -->
+            <!-- 今日の記録まとめ（水は実飲水量gのみ表示、回数はなし） -->
             <section class="bg-amber-100/60 rounded-2xl p-3.5 mb-6 text-amber-900 border border-amber-200/50">
                 <h2 class="text-xs font-bold uppercase tracking-wider text-amber-700 mb-2">今日の記録まとめ ({{ todayStr }})</h2>
                 <div class="grid grid-cols-4 gap-1.5 text-center text-xs">
@@ -767,10 +939,15 @@
                         </div>
                         <span v-if="todayHealth.legacy" class="block text-[9px] text-slate-400">旧 {{ todayHealth.legacy }}回</span>
                     </div>
+                    <!-- 水実飲水量（回数なし・g表示） -->
                     <div class="bg-white/80 rounded-lg p-1.5 flex flex-col justify-between">
-                        <span class="block text-slate-500 text-[10px]">水</span>
-                        <span class="text-sm font-bold text-cyan-600">{{ todayHealth.water }} 回</span>
-                        <span></span>
+                        <span class="block text-slate-500 text-[10px]">水 実飲水量</span>
+                        <div>
+                            <span class="text-sm font-bold text-cyan-600">
+                                {{ todayHealth.waterMl == null ? '未計量' : todayHealth.waterMl + ' g' }}
+                            </span>
+                        </div>
+                        <span v-if="todayHealth.waterLegacy" class="block text-[9px] text-slate-400">旧 {{ todayHealth.waterLegacy }}件</span>
                     </div>
                     <div class="bg-white/80 rounded-lg p-1.5 flex flex-col justify-between">
                         <span class="block text-slate-500 text-[10px]">尿 / 便</span>
@@ -835,13 +1012,16 @@
                                 </span>
                             </div>
 
+                            <!-- ごはんログ表示 -->
                             <div v-if="log.category === 'food'" class="text-xs text-slate-700 space-y-0.5">
                                 <p><span class="text-slate-400">種類:</span> <span class="font-semibold">{{ log.details?.type || 'ドライ' }}</span></p>
                                 <template v-if="log.details?.dryAction">
-                                    <p v-if="log.details.dryAction==='serve'" class="font-bold text-orange-600">{{ log.details.serveGrams }}g 配膳（{{ log.details.isClosed ? '回収済' : '配膳中' }}）</p>
+                                    <p v-if="log.details.dryAction==='serve'" class="font-bold text-orange-600">
+                                        器込 {{ log.details.serveGrams }}g セット（{{ log.details.isClosed ? '回収済' : '配膳中' }}）
+                                    </p>
                                     <template v-else>
                                         <p class="font-bold text-orange-600">実食 {{ log.details.eatenGrams }}g</p>
-                                        <p class="text-[10px] text-slate-400">配膳 {{ log.details.serveGrams }}g − 廃棄 {{ log.details.discardGrams }}g / 集計日 {{ log.details.effectiveDate }}</p>
+                                        <p class="text-[10px] text-slate-400">セット時 {{ log.details.serveGrams }}g − 回収時 {{ log.details.discardGrams }}g / 計量日 {{ log.details.effectiveDate }}</p>
                                     </template>
                                 </template>
                                 <p v-else>
@@ -852,9 +1032,22 @@
                                 <p v-if="log.details?.note" class="text-slate-500 italic mt-1">「{{ log.details.note }}」</p>
                             </div>
 
+                            <!-- 水ログ表示 -->
                             <div v-else-if="log.category === 'water'" class="text-xs text-slate-700 space-y-0.5">
-                                <p v-if="log.details?.ml !== undefined && log.details?.ml !== ''" class="font-bold text-cyan-700">{{ log.details.ml }} ml</p>
-                                <p><span class="text-slate-400">飲んだ量:</span> <span class="font-semibold text-cyan-600">{{ log.details?.amount }}</span></p>
+                                <template v-if="log.details?.waterAction">
+                                    <p v-if="log.details.waterAction==='serve'" class="font-bold text-cyan-600">
+                                        器込 {{ log.details.serveMl }}g 給水セット（{{ log.details.isClosed ? '回収済' : '給水中' }}）
+                                    </p>
+                                    <template v-else>
+                                        <p class="font-bold text-cyan-700">実飲水量 {{ log.details.drunkMl }}g</p>
+                                        <p class="text-[10px] text-slate-400">セット時 {{ log.details.serveMl }}g − 回収時 {{ log.details.discardMl }}g / 計量日 {{ log.details.effectiveDate }}</p>
+                                    </template>
+                                </template>
+                                <template v-else>
+                                    <p v-if="log.details?.ml !== undefined && log.details?.ml !== ''" class="font-bold text-cyan-700">{{ log.details.ml }} g</p>
+                                    <p><span class="text-slate-400">飲んだ量:</span> <span class="font-semibold text-cyan-600">{{ log.details?.amount }}</span></p>
+                                    <span class="text-[10px] text-slate-400">（旧記録）</span>
+                                </template>
                                 <p v-if="log.details?.note" class="text-slate-500 italic mt-1">「{{ log.details.note }}」</p>
                             </div>
 
@@ -908,28 +1101,28 @@
             <div class="flex items-center justify-between">
                 <div>
                     <h2 class="text-sm font-bold text-slate-800">直近7日間の推移</h2>
-                    <p class="text-[11px] text-slate-400">日付・曜日ごとの健康バランス</p>
+                    <p class="text-[11px] text-slate-400">日付・曜日ごとの摂取バランス</p>
                 </div>
                 <button @click="printReport" :disabled="!isOnline" class="bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-xl px-3.5 py-2 shadow-sm transition flex items-center gap-1.5 disabled:opacity-40">
                     <i class="fa-solid fa-print"></i> PDFで保存 / 印刷
                 </button>
             </div>
 
-            <!-- 週間グラフ（ごはん積み上げ棒 + 回数折れ線） -->
+            <!-- 週間グラフ（ごはん積み上げ棒 + 水実飲水量点線折れ線 + 回数折れ線） -->
             <section class="bg-white p-4 rounded-2xl border border-slate-100 shadow-sm">
                 <div class="relative h-64">
                     <canvas id="integratedChart"></canvas>
                 </div>
             </section>
 
-            <!-- 週間数値表 -->
+            <!-- 週間数値表（水は実飲水量gのみ） -->
             <section class="bg-white p-3.5 rounded-2xl border border-slate-100 shadow-sm overflow-x-auto">
                 <table class="w-full text-[11px] whitespace-nowrap">
                     <thead>
                         <tr class="text-slate-400 border-b border-slate-100">
                             <th class="py-1.5 text-left font-bold">日付 (曜日)</th>
                             <th class="py-1.5 text-center font-bold">ごはん実食</th>
-                            <th class="py-1.5 text-center font-bold">水</th>
+                            <th class="py-1.5 text-center font-bold">水 実飲水量</th>
                             <th class="py-1.5 text-center font-bold">尿</th>
                             <th class="py-1.5 text-center font-bold">便</th>
                             <th class="py-1.5 text-center font-bold">異変</th>
@@ -954,7 +1147,9 @@
                                 <span v-else class="text-slate-400 font-normal">—</span>
                                 <span v-if="d.legacy" class="text-[9px] text-slate-400 font-normal block">+旧{{ d.legacy }}回</span>
                             </td>
-                            <td class="py-2.5 text-center text-cyan-700 font-semibold">{{ d.water }}回</td>
+                            <td class="py-2.5 text-center font-bold text-cyan-700">
+                                {{ d.waterMl != null ? d.waterMl + 'g' : '—' }}
+                            </td>
                             <td class="py-2.5 text-center text-amber-700 font-semibold">{{ d.pee }}回</td>
                             <td class="py-2.5 text-center text-amber-900 font-semibold">{{ d.poop }}回</td>
                             <td class="py-2.5 text-center" :class="d.symptom > 0 ? 'text-rose-600 font-bold' : 'text-slate-400'">
@@ -964,7 +1159,7 @@
                     </tbody>
                 </table>
                 <p class="text-[10px] text-slate-400 mt-2.5 leading-relaxed">
-                    ※ 「—」は実食量の計量記録がない日です。棒グラフはドライ（橙）・ウェット（紫）・その他（緑）の積み上げです。
+                    ※ 「—」は実測の計量記録がない日です。棒グラフはドライ（橙）・ウェット（紫）・その他（緑）の積み上げ、水実飲水量は青い点線折れ線です。
                 </p>
             </section>
 
@@ -989,37 +1184,55 @@
             <h2 style="font-size:18px;font-weight:bold;color:#78350f;">マックスの健康日記・通院用レポート</h2>
             <p style="font-size:10px;color:#64748b;margin-bottom:8px;">期間 {{ formatMMDDDay(weekly[0].date) }} ～ {{ formatMMDDDay(weekly[6].date) }} ／ データ取得日時 {{ syncedAt }}</p>
             <svg viewBox="0 0 1160 520" style="width:100%;height:auto" role="img" aria-label="7日間の推移と日付軸を合わせた数値表">
-                <text x="10" y="28" font-size="12">左軸：ごはん実食 g (棒グラフ)</text><text x="1015" y="28" font-size="12">右軸：回数・件数 (折れ線)</text>
-                <g v-for="n in [0,1,2,3,4]"><line x1="150" x2="1070" :y1="205-n*36.25" :y2="205-n*36.25" stroke="#e2e8f0"/><text x="135" :y="209-n*36.25" text-anchor="end" font-size="10">{{ round1(maxGrams*n/4) }}</text><text x="1080" :y="209-n*36.25" font-size="10">{{ round1(maxCounts*n/4) }}</text></g>
+                <text x="10" y="28" font-size="12">左軸：ごはん実食・水実飲水量 g</text>
+                <text x="1015" y="28" font-size="12">右軸：回数・件数 (折れ線)</text>
+                <g v-for="n in [0,1,2,3,4]">
+                    <line x1="150" x2="1070" :y1="205-n*36.25" :y2="205-n*36.25" stroke="#e2e8f0"/>
+                    <text x="135" :y="209-n*36.25" text-anchor="end" font-size="10">{{ round1(maxGrams*n/4) }}</text>
+                    <text x="1080" :y="209-n*36.25" font-size="10">{{ round1(maxCounts*n/4) }}</text>
+                </g>
                 
                 <!-- ごはん実食 積み上げ棒グラフ（ドライ=薄橙, ウェット=薄紫, その他=薄緑） -->
                 <g v-for="(d, i) in weekly">
                     <template v-if="d.food != null && d.food > 0">
-                        <!-- ドライ (薄橙) -->
                         <rect v-if="d.dry > 0" :x="reportX(i) - 14" :y="205 - (d.dry / maxGrams) * 145" width="28" :height="(d.dry / maxGrams) * 145" fill="#fdba74" rx="1"/>
-                        <!-- ウェット (薄紫) -->
                         <rect v-if="d.wet > 0" :x="reportX(i) - 14" :y="205 - ((d.dry + d.wet) / maxGrams) * 145" width="28" :height="(d.wet / maxGrams) * 145" fill="#c4b5fd" rx="1"/>
-                        <!-- その他 (薄緑) -->
                         <rect v-if="d.other > 0" :x="reportX(i) - 14" :y="205 - ((d.dry + d.wet + d.other) / maxGrams) * 145" width="28" :height="(d.other / maxGrams) * 145" fill="#6ee7b7" rx="1"/>
                     </template>
                 </g>
 
-                <!-- 折れ線グラフ（水、尿、便、異変：手前レイヤー） -->
-                <g v-for="s in lineSeries">
-                    <line v-for="seg in reportSegments(s.key)" :x1="reportX(seg.i)" :x2="reportX(seg.i+1)" :y1="reportY(seg.a,s.key)" :y2="reportY(seg.b,s.key)" :stroke="s.color" stroke-width="2.5"/>
+                <!-- 水実飲水量 折れ線（シアン・点線：左軸 g） -->
+                <g>
+                    <line v-for="seg in reportWaterSegments()" :key="'water-seg-'+seg.i" :x1="reportX(seg.i)" :x2="reportX(seg.i+1)" :y1="reportYWater(seg.a)" :y2="reportYWater(seg.b)" stroke="#06b6d4" stroke-width="2" stroke-dasharray="4 3"/>
                     <template v-for="(d,i) in weekly">
-                        <circle v-if="d[s.key]!=null" :cx="reportX(i)" :cy="reportY(d[s.key],s.key)" r="3.5" fill="#ffffff" :stroke="s.color" stroke-width="2"/>
+                        <circle v-if="d.waterMl != null" :key="'water-pt-'+i" :cx="reportX(i)" :cy="reportYWater(d.waterMl)" r="3.5" fill="#ffffff" stroke="#0891b2" stroke-width="2"/>
                     </template>
                 </g>
 
-                <g v-for="(d,i) in weekly"><line :x1="reportX(i)" :x2="reportX(i)" y1="50" y2="505" stroke="#cbd5e1" stroke-dasharray="2 4"/><text :x="reportX(i)" y="231" text-anchor="middle" font-size="12" font-weight="bold">{{ formatMMDDDay(d.date) }}</text><text :x="reportX(i)" y="250" text-anchor="middle" font-size="10">{{ d.fluid?'ⓞ 補液':'' }} {{ d.stimulant?'増進剤':'' }}</text></g>
-                <g v-for="(s,row) in reportRows"><rect x="0" :y="263+row*27" width="1135" height="27" :fill="row%2?'#f8fafc':'#fff'"/><text x="10" :y="281+row*27" :fill="s.color" font-size="11" font-weight="bold">{{ s.label }}</text><text v-for="(d,i) in weekly" :x="reportX(i)" :y="281+row*27" text-anchor="middle" font-size="11">{{ d[s.key]==null?'—':d[s.key] }}</text></g>
+                <!-- 折れ線グラフ（尿、便、異変：右軸 回数・件数） -->
+                <g v-for="s in countSeries" :key="'counts-'+s.key">
+                    <line v-for="seg in reportSegments(s.key)" :key="s.key+seg.i" :x1="reportX(seg.i)" :x2="reportX(seg.i+1)" :y1="reportY(seg.a,s.key)" :y2="reportY(seg.b,s.key)" :stroke="s.color" stroke-width="2.5"/>
+                    <template v-for="(d,i) in weekly">
+                        <circle v-if="d[s.key]!=null" :key="s.key+'-pt-'+i" :cx="reportX(i)" :cy="reportY(d[s.key],s.key)" r="3.5" fill="#ffffff" :stroke="s.color" stroke-width="2"/>
+                    </template>
+                </g>
+
+                <g v-for="(d,i) in weekly" :key="'col-date-'+i">
+                    <line :x1="reportX(i)" :x2="reportX(i)" y1="50" y2="505" stroke="#cbd5e1" stroke-dasharray="2 4"/>
+                    <text :x="reportX(i)" y="231" text-anchor="middle" font-size="12" font-weight="bold">{{ formatMMDDDay(d.date) }}</text>
+                    <text :x="reportX(i)" y="250" text-anchor="middle" font-size="10">{{ d.fluid?'ⓞ 補液':'' }} {{ d.stimulant?'増進剤':'' }}</text>
+                </g>
+                <g v-for="(s,row) in reportRows" :key="'report-row-'+s.key">
+                    <rect x="0" :y="263+row*27" width="1135" height="27" :fill="row%2?'#f8fafc':'#fff'"/>
+                    <text x="10" :y="281+row*27" :fill="s.color" font-size="11" font-weight="bold">{{ s.label }}</text>
+                    <text v-for="(d,i) in weekly" :key="s.key+i" :x="reportX(i)" :y="281+row*27" text-anchor="middle" font-size="11">{{ d[s.key]==null?'—':d[s.key] }}</text>
+                </g>
             </svg>
-            <p style="font-size:10px;color:#64748b;margin-top:6px;">—：計量記録なし。棒グラフは下からドライ（橙）・ウェット（紫）・その他（緑）の積み上げです。</p>
+            <p style="font-size:10px;color:#64748b;margin-top:6px;">—：計量記録なし。棒グラフは下からドライ（橙）・ウェット（紫）・その他（緑）の積み上げ、水実飲水量は青い点線折れ線です。</p>
             <div style="font-size:10px;margin-top:8px">
                 <strong>気付き・異変メモ</strong>
                 <p v-if="!recentNotes.length" style="color:#94a3b8">記録なし</p>
-                <p v-for="log in recentNotes.slice(0,5)" style="white-space:pre-wrap;margin-top:2px;">{{ formatTime(log.timestamp) }} {{ log.details?.symptomType }} {{ (log.details?.description||'').slice(0,100) }}{{ (log.details?.description||'').length>100?'…':'' }}</p>
+                <p v-for="log in recentNotes.slice(0,5)" :key="log.id" style="white-space:pre-wrap;margin-top:2px;">{{ formatTime(log.timestamp) }} {{ log.details?.symptomType }} {{ (log.details?.description||'').slice(0,100) }}{{ (log.details?.description||'').length>100?'…':'' }}</p>
             </div>
         </div>
 
@@ -1049,7 +1262,7 @@
                     <input type="datetime-local" v-model="form.timestamp" class="w-full text-xs border border-slate-200 rounded-xl p-2.5 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-amber-400">
                 </div>
 
-                <!-- ごはんフォーム -->
+                <!-- ごはんフォーム（器ごと計量） -->
                 <div v-if="activeCategory === 'food'" class="space-y-4">
                     <div>
                         <label class="block text-xs font-bold text-slate-600 mb-1.5">ごはんの種類</label>
@@ -1068,10 +1281,10 @@
                         </div>
                     </div>
 
-                    <!-- 配膳 / 廃棄 / まとめて入力 -->
+                    <!-- セット / 回収 / まとめて入力 -->
                     <div class="p-3.5 bg-orange-50 rounded-2xl border border-orange-100 space-y-3">
                         <div class="flex gap-1">
-                            <button v-for="action in [{id:'serve',label:'① 配膳'},{id:'discard',label:'② 廃棄'},{id:'instant',label:'まとめて入力'}]" :key="action.id"
+                            <button v-for="action in [{id:'serve',label:'① セット (配膳)'},{id:'discard',label:'② 回収 (計量)'},{id:'instant',label:'まとめて入力'}]" :key="action.id"
                                 :disabled="Boolean(editingLogId)" @click="form.food.dryAction=action.id" 
                                 class="flex-1 rounded-xl text-xs py-2 border font-bold transition" 
                                 :class="form.food.dryAction===action.id?'bg-orange-500 text-white border-orange-500 shadow-sm':'bg-white text-slate-700 border-orange-200'">
@@ -1079,26 +1292,26 @@
                             </button>
                         </div>
                         <div v-if="form.food.dryAction==='discard' && !editingLogId">
-                            <label class="text-xs font-bold text-slate-600">片付ける配膳</label>
+                            <label class="text-xs font-bold text-slate-600">回収するお皿</label>
                             <select v-model="form.food.targetServeLogId" @change="selectServe" class="w-full rounded-xl border border-orange-200 p-2 text-xs bg-white mt-1">
                                 <option value="">選択してください</option>
                                 <option v-for="serve in activeServes" :key="serve.id" :value="serve.id">
-                                    {{ formatTime(serve.timestamp) }} [{{ serve.details.type || 'ドライ' }}] {{ serve.details.serveGrams }}g {{ serve.details.note }}
+                                    {{ formatTime(serve.timestamp) }} [{{ serve.details.type || 'ドライ' }}] 器込{{ serve.details.serveGrams }}g {{ serve.details.note }}
                                 </option>
                             </select>
                         </div>
                         <label class="block text-xs font-bold text-slate-700">
-                            配膳量 (g)
-                            <input v-model="form.food.serveGrams" :readonly="form.food.dryAction==='discard'" type="text" inputmode="decimal" class="w-full border border-orange-200 rounded-xl p-2.5 mt-1 bg-white" placeholder="例: 10.0">
+                            セット時の重さ（器込み g）
+                            <input v-model="form.food.serveGrams" :readonly="form.food.dryAction==='discard'" type="text" inputmode="decimal" class="w-full border border-orange-200 rounded-xl p-2.5 mt-1 bg-white" placeholder="例: 120.5">
                         </label>
                         <template v-if="form.food.dryAction!=='serve'">
                             <label class="block text-xs font-bold text-slate-700">
-                                廃棄量 (g)
-                                <input v-model="form.food.discardGrams" type="text" inputmode="decimal" class="w-full border border-orange-200 rounded-xl p-2.5 mt-1 bg-white" placeholder="完食の場合は 0">
+                                回収時の重さ（器込み g）
+                                <input v-model="form.food.discardGrams" type="text" inputmode="decimal" class="w-full border border-orange-200 rounded-xl p-2.5 mt-1 bg-white" placeholder="食べた後の器の重さ">
                             </label>
                             <div class="p-2.5 bg-white rounded-xl border border-orange-200">
-                                <p class="text-xs font-bold text-orange-700">実食量: {{ foodPreview }}</p>
-                                <p class="text-[10px] text-slate-400 mt-0.5">※廃棄日時の集計に算入されます</p>
+                                <p class="text-xs font-bold text-orange-700">実食量 (差分): {{ foodPreview }}</p>
+                                <p class="text-[10px] text-slate-400 mt-0.5">※回収・計量日時の集計に算入されます</p>
                             </div>
                         </template>
                     </div>
@@ -1109,26 +1322,53 @@
                     </div>
                 </div>
 
-                <!-- 水フォーム -->
+                <!-- 水フォーム（器ごと計量：重さ g） -->
                 <div v-if="activeCategory === 'water'" class="space-y-4">
-                    <div>
-                        <label class="block text-xs font-bold text-slate-600 mb-1.5">飲んだ量</label>
-                        <div class="grid grid-cols-3 gap-2">
-                            <button v-for="amount in ['多め', '普通', '少なめ']" :key="amount"
-                                type="button" @click="form.water.amount = amount"
-                                class="py-2.5 px-2 text-xs rounded-xl border font-medium transition"
-                                :class="form.water.amount === amount ? 'bg-cyan-500 text-white border-cyan-500 font-bold' : 'bg-slate-50 text-slate-700 border-slate-200'">
-                                {{ amount }}
+                    <!-- 旧記録編集用のフォールバック -->
+                    <div v-if="form.water.waterAction === 'legacy'" class="p-3.5 bg-cyan-50 rounded-2xl border border-cyan-100 space-y-3">
+                        <p class="text-xs font-bold text-cyan-800">旧記録（直接入力）の編集</p>
+                        <label class="block text-xs font-bold text-slate-700">
+                            飲水量 (g)
+                            <input v-model="form.water.ml" type="text" inputmode="decimal" class="w-full border border-cyan-200 rounded-xl p-2.5 mt-1 bg-white" placeholder="例: 25">
+                        </label>
+                    </div>
+                    <!-- 新規または器ごと計量形式 -->
+                    <div v-else class="p-3.5 bg-cyan-50 rounded-2xl border border-cyan-100 space-y-3">
+                        <div class="flex gap-1">
+                            <button v-for="action in [{id:'serve',label:'① セット (給水)'},{id:'discard',label:'② 回収 (計量)'},{id:'instant',label:'まとめて入力'}]" :key="action.id"
+                                :disabled="Boolean(editingLogId)" @click="form.water.waterAction=action.id" 
+                                class="flex-1 rounded-xl text-xs py-2 border font-bold transition" 
+                                :class="form.water.waterAction===action.id?'bg-cyan-500 text-white border-cyan-500 shadow-sm':'bg-white text-slate-700 border-cyan-200'">
+                                {{ action.label }}
                             </button>
                         </div>
-                    </div>
-                    <div>
-                        <label class="block text-xs font-bold text-slate-600 mb-1">飲水量 (ml / 任意)</label>
-                        <input v-model="form.water.ml" type="text" inputmode="decimal" placeholder="例: 25" class="w-full text-xs border border-slate-200 rounded-xl p-2.5 focus:outline-none focus:ring-2 focus:ring-cyan-400">
+                        <div v-if="form.water.waterAction==='discard' && !editingLogId">
+                            <label class="text-xs font-bold text-slate-600">回収する水入れ</label>
+                            <select v-model="form.water.targetServeLogId" @change="selectWaterServe" class="w-full rounded-xl border border-cyan-200 p-2 text-xs bg-white mt-1">
+                                <option value="">選択してください</option>
+                                <option v-for="serve in activeWaterServes" :key="serve.id" :value="serve.id">
+                                    {{ formatTime(serve.timestamp) }} 器込{{ serve.details.serveMl }}g {{ serve.details.note }}
+                                </option>
+                            </select>
+                        </div>
+                        <label class="block text-xs font-bold text-slate-700">
+                            セット時の重さ（器込み g）
+                            <input v-model="form.water.serveMl" :readonly="form.water.waterAction==='discard'" type="text" inputmode="decimal" class="w-full border border-cyan-200 rounded-xl p-2.5 mt-1 bg-white" placeholder="水を入れた器の重さ 例: 250">
+                        </label>
+                        <template v-if="form.water.waterAction!=='serve'">
+                            <label class="block text-xs font-bold text-slate-700">
+                                回収時の重さ（器込み g）
+                                <input v-model="form.water.discardMl" type="text" inputmode="decimal" class="w-full border border-cyan-200 rounded-xl p-2.5 mt-1 bg-white" placeholder="下げる時の器の重さ">
+                            </label>
+                            <div class="p-2.5 bg-white rounded-xl border border-cyan-200">
+                                <p class="text-xs font-bold text-cyan-700">実飲水量 (差分): {{ waterPreview }}</p>
+                                <p class="text-[10px] text-slate-400 mt-0.5">※回収・計量日時の集計に算入されます</p>
+                            </div>
+                        </template>
                     </div>
                     <div>
                         <label class="block text-xs font-bold text-slate-600 mb-1">備考</label>
-                        <input type="text" v-model="form.water.note" placeholder="例: 容器から直接飲んだ" class="w-full text-xs border border-slate-200 rounded-xl p-2.5 focus:outline-none focus:ring-2 focus:ring-cyan-400">
+                        <input type="text" v-model="form.water.note" placeholder="例: ぬるま湯、器の洗浄など" class="w-full text-xs border border-slate-200 rounded-xl p-2.5 focus:outline-none focus:ring-2 focus:ring-cyan-400">
                     </div>
                 </div>
 
