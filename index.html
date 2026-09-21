@@ -58,8 +58,8 @@
         const isPee = (type) => /おしっこ|尿|両方/.test(type || '');
         const isPoop = (type) => /うんち|うんこ|便|両方/.test(type || '');
 
-        // ごはん（器ごと計量：お皿・商品名必須チェック ＆ 過去ログ互換）
-        const prepareFood = (food, isLegacy = false) => {
+        // ごはん（器ごと計量：お皿・商品名は任意）
+        const prepareFood = (food) => {
             const res = { ...food };
             if (!['ドライ', 'ウェット', 'その他'].includes(res.type)) {
                 res.type = 'その他';
@@ -70,12 +70,6 @@
             // 回収（計量）で回収対象が未選択の場合
             if (res.dryAction === 'discard' && !res.targetServeLogId) {
                 throw new Error('回収するお皿を選択してください。');
-            }
-
-            // 新規・回収時の必須チェック（過去ログ編集時は空欄でも許容）
-            if (!isLegacy) {
-                if (!res.dish) throw new Error('お皿・場所を入力してください。');
-                if (!res.productName) throw new Error('商品名・銘柄を入力してください。');
             }
 
             if (res.dryAction === 'serve') {
@@ -105,19 +99,14 @@
             return res;
         };
 
-        // お水（器ごと計量：お皿必須チェック ＆ 過去ログ互換）
-        const prepareWater = (water, isLegacy = false) => {
+        // お水（器ごと計量：お皿は任意）
+        const prepareWater = (water) => {
             const res = { ...water };
             res.dish = res.dish ? String(res.dish).trim() : '';
 
             // 回収（計量）で回収対象が未選択の場合
             if (res.waterAction === 'discard' && !res.targetServeLogId) {
                 throw new Error('回収する水入れを選択してください。');
-            }
-
-            // 新規・回収時の必須チェック（過去ログ編集時は空欄でも許容）
-            if (!isLegacy && !res.dish) {
-                throw new Error('お皿・水入れの場所を入力してください。');
             }
 
             if (res.waterAction === 'serve') {
@@ -398,11 +387,6 @@
                     return Array.from(set).slice(0, 5);
                 });
 
-                const editingOriginalLog = computed(() => {
-                    if (!editingLogId.value) return null;
-                    return logs.value.find(l => l.id === editingLogId.value) || null;
-                });
-
                 const openModal = (category) => {
                     editingLogId.value = null;
                     deletingLogId.value = null;
@@ -521,14 +505,10 @@
                         const timestamp = form.value.timestamp;
                         if (!timestamp || !Number.isFinite(new Date(timestamp).getTime())) throw new Error('記録日時を入力してください。');
 
-                        // 過去データ（改修前データ）を編集しているか判定（必須チェック緩和）
-                        const isLegacyFood = Boolean(editingOriginalLog.value?.category === 'food' && (!editingOriginalLog.value?.details?.dish || !editingOriginalLog.value?.details?.productName));
-                        const isLegacyWater = Boolean(editingOriginalLog.value?.category === 'water' && !editingOriginalLog.value?.details?.dish);
-
                         const details = category === 'food' 
-                            ? prepareFood(form.value.food, isLegacyFood) 
+                            ? prepareFood(form.value.food) 
                             : category === 'water' 
-                            ? prepareWater(form.value.water, isLegacyWater) 
+                            ? prepareWater(form.value.water) 
                             : { ...form.value[category] };
 
                         if (category === 'food' && ['instant', 'discard'].includes(details.dryAction)) details.effectiveDate = timestamp.slice(0, 10);
@@ -574,8 +554,6 @@
                                 d.serveGrams = target.details?.serveGrams;
                                 d.dish = target.details?.dish || d.dish || '';
                                 d.productName = target.details?.productName || d.productName || '';
-                                if (!d.dish) throw new Error('お皿・場所を入力してください。');
-                                if (!d.productName) throw new Error('商品名・銘柄を入力してください。');
                                 if (d.discardGrams > d.serveGrams) throw new Error('回収時の重さがセット時を超えています。');
                                 d.eatenGrams = round1(d.serveGrams - d.discardGrams);
                             }
@@ -592,7 +570,6 @@
                                 }
                                 d.serveMl = target.details?.serveMl;
                                 d.dish = target.details?.dish || d.dish || '';
-                                if (!d.dish) throw new Error('お皿・水入れの場所を入力してください。');
                                 if (d.discardMl > d.serveMl) throw new Error('回収時の重さがセット時を超えています。');
                                 d.drunkMl = round1(d.serveMl - d.discardMl);
                             }
@@ -698,8 +675,7 @@
 
                 const foodPreview = computed(() => {
                     try {
-                        const isLegacyFood = Boolean(editingOriginalLog.value?.category === 'food' && (!editingOriginalLog.value?.details?.dish || !editingOriginalLog.value?.details?.productName));
-                        const d = prepareFood(form.value.food, isLegacyFood);
+                        const d = prepareFood(form.value.food);
                         return d.eatenGrams === undefined ? '—' : `${d.eatenGrams} g`;
                     } catch {
                         return '入力値を確認してください';
@@ -708,8 +684,7 @@
 
                 const waterPreview = computed(() => {
                     try {
-                        const isLegacyWater = Boolean(editingOriginalLog.value?.category === 'water' && !editingOriginalLog.value?.details?.dish);
-                        const d = prepareWater(form.value.water, isLegacyWater);
+                        const d = prepareWater(form.value.water);
                         return d.drunkMl === undefined ? '—' : `${d.drunkMl} g`;
                     } catch {
                         return '入力値を確認してください';
@@ -949,7 +924,7 @@
 
         <!-- ================= タブ1: 記録・履歴 ================= -->
         <div v-show="currentTab === 'input'" class="no-print">
-            <!-- 配膳中ごはんカード（スリムデザイン維持・お皿/商品名バッジ付き） -->
+            <!-- 配膳中ごはんカード（スリムデザイン・お皿/商品名がある場合のみバッジ表示） -->
             <div v-for="serve in activeServes" :key="serve.id" 
                 class="text-white rounded-xl py-2 px-3 mb-2 flex justify-between items-center gap-2 shadow-sm transition"
                 :class="{
@@ -980,7 +955,7 @@
                 </button>
             </div>
 
-            <!-- 給水中カード（スリムデザイン維持・お皿バッジ付き） -->
+            <!-- 給水中カード（スリムデザイン・お皿がある場合のみバッジ表示） -->
             <div v-for="wServe in activeWaterServes" :key="wServe.id" 
                 class="text-white rounded-xl py-2 px-3 mb-2.5 flex justify-between items-center gap-2 shadow-sm transition bg-gradient-to-r from-cyan-600 to-sky-500">
                 <div class="min-w-0 flex-1">
@@ -1362,7 +1337,7 @@
                         <input type="datetime-local" v-model="form.timestamp" class="w-full text-xs border border-slate-200 rounded-xl p-2.5 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-amber-400">
                     </div>
 
-                    <!-- ごはんフォーム（器ごと計量・お皿＆商品名必須・履歴チップ・回収時固定） -->
+                    <!-- ごはんフォーム（器ごと計量・お皿＆商品名は任意） -->
                     <div v-if="activeCategory === 'food'" class="space-y-4">
                         <div>
                             <label class="block text-xs font-bold text-slate-600 mb-1.5">ごはんの種類</label>
@@ -1381,23 +1356,24 @@
                             </div>
                         </div>
 
-                        <!-- 回収モード時はお皿・商品名を固定バッジ表示（食い違い防止） -->
+                        <!-- 回収モード時はお皿・商品名を引き継ぎ表示 -->
                         <div v-if="form.food.dryAction === 'discard'" class="p-3 bg-amber-50/80 rounded-2xl border border-amber-200/70 text-xs">
                             <div class="text-[10px] text-amber-800 font-bold mb-1.5 flex items-center gap-1">
                                 <i class="fa-solid fa-lock text-[9px]"></i> 配膳情報（セット時の記録を引き継ぎ）
                             </div>
                             <div class="flex gap-2 items-center flex-wrap">
-                                <span class="bg-white border border-amber-300 text-amber-900 px-2 py-0.5 rounded-lg font-semibold text-[11px]">🥣 {{ form.food.dish || '（未設定）' }}</span>
-                                <span class="bg-white border border-orange-300 text-orange-900 px-2 py-0.5 rounded-lg font-semibold text-[11px]">🏷️ {{ form.food.productName || '（未設定）' }}</span>
+                                <span v-if="form.food.dish" class="bg-white border border-amber-300 text-amber-900 px-2 py-0.5 rounded-lg font-semibold text-[11px]">🥣 {{ form.food.dish }}</span>
+                                <span v-if="form.food.productName" class="bg-white border border-orange-300 text-orange-900 px-2 py-0.5 rounded-lg font-semibold text-[11px]">🏷️ {{ form.food.productName }}</span>
+                                <span v-if="!form.food.dish && !form.food.productName" class="text-slate-400 text-[11px]">（お皿・商品名 指定なし）</span>
                             </div>
                         </div>
 
-                        <!-- 通常・セット時は入力可能（ワンタップ履歴チップ付き） -->
+                        <!-- 通常・セット時は入力可能（任意項目） -->
                         <div v-else class="grid grid-cols-2 gap-2">
                             <div>
                                 <label class="block text-xs font-bold text-slate-600 mb-1 flex items-center justify-between">
                                     <span>お皿・場所</span>
-                                    <span class="text-[10px] text-rose-600 font-bold bg-rose-50 px-1.5 py-0.2 rounded border border-rose-200">必須</span>
+                                    <span class="text-[10px] text-slate-400 font-normal">任意</span>
                                 </label>
                                 <input type="text" v-model="form.food.dish" placeholder="例: 白い陶器皿" class="w-full text-xs border border-slate-200 rounded-xl p-2.5 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-amber-400">
                                 <!-- お皿履歴チップ -->
@@ -1411,7 +1387,7 @@
                             <div>
                                 <label class="block text-xs font-bold text-slate-600 mb-1 flex items-center justify-between">
                                     <span>商品名・銘柄</span>
-                                    <span class="text-[10px] text-rose-600 font-bold bg-rose-50 px-1.5 py-0.2 rounded border border-rose-200">必須</span>
+                                    <span class="text-[10px] text-slate-400 font-normal">任意</span>
                                 </label>
                                 <input type="text" v-model="form.food.productName" placeholder="例: 腎ケア" class="w-full text-xs border border-slate-200 rounded-xl p-2.5 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-amber-400">
                                 <!-- 商品名履歴チップ -->
@@ -1468,21 +1444,22 @@
                         </div>
                     </div>
 
-                    <!-- 水フォーム（器ごと計量：お皿必須・履歴チップ・回収時固定） -->
+                    <!-- 水フォーム（器ごと計量：お皿は任意） -->
                     <div v-if="activeCategory === 'water'" class="space-y-4">
-                        <!-- 回収モード時はお皿を固定バッジ表示（食い違い防止） -->
+                        <!-- 回収モード時はお皿を引き継ぎ表示 -->
                         <div v-if="form.water.waterAction === 'discard'" class="p-3 bg-cyan-50/80 rounded-2xl border border-cyan-200/70 text-xs">
                             <div class="text-[10px] text-cyan-800 font-bold mb-1.5 flex items-center gap-1">
                                 <i class="fa-solid fa-lock text-[9px]"></i> 給水情報（セット時の記録を引き継ぎ）
                             </div>
-                            <span class="bg-white border border-cyan-300 text-cyan-900 px-2 py-0.5 rounded-lg font-semibold text-[11px]">🥣 {{ form.water.dish || '（未設定）' }}</span>
+                            <span v-if="form.water.dish" class="bg-white border border-cyan-300 text-cyan-900 px-2 py-0.5 rounded-lg font-semibold text-[11px]">🥣 {{ form.water.dish }}</span>
+                            <span v-else class="text-slate-400 text-[11px]">（水入れ場所 指定なし）</span>
                         </div>
 
-                        <!-- 通常・セット時は入力可能（ワンタップ履歴チップ付き） -->
+                        <!-- 通常・セット時は入力可能（任意項目） -->
                         <div v-else>
                             <label class="block text-xs font-bold text-slate-600 mb-1 flex items-center justify-between">
                                 <span>お皿・水入れの場所</span>
-                                <span class="text-[10px] text-rose-600 font-bold bg-rose-50 px-1.5 py-0.2 rounded border border-rose-200">必須</span>
+                                <span class="text-[10px] text-slate-400 font-normal">任意</span>
                             </label>
                             <input type="text" v-model="form.water.dish" placeholder="例: ヘルスウォーター、リビング陶器皿" class="w-full text-xs border border-slate-200 rounded-xl p-2.5 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-cyan-400">
                             <!-- 水入れ履歴チップ -->
@@ -1616,7 +1593,7 @@
                     </div>
                 </div>
 
-                <!-- 固定フッター（Sticky Footer：スクロールやキーボードに埋もれない設計） -->
+                <!-- 固定フッター（Sticky Footer） -->
                 <div class="p-4 bg-white border-t border-slate-100 shrink-0 shadow-[0_-4px_12px_rgba(0,0,0,0.03)]">
                     <button @click="saveLog" :disabled="isSaving" class="w-full py-3 bg-amber-600 hover:bg-amber-700 text-white text-sm font-bold rounded-xl shadow-md transition active:scale-98 flex items-center justify-center gap-2">
                         <i v-if="isSaving" class="fa-solid fa-spinner fa-spin"></i>
