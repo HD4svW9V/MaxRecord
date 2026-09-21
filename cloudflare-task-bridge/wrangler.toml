@@ -5,10 +5,6 @@ compatibility_date = "2026-09-21"
 [triggers]
 crons = ["* * * * *"]
 
-[[kv_namespaces]]
-binding = "MAXRECORD_STATE"
-id = "REPLACE_WITH_KV_NAMESPACE_ID"
-
 [vars]
 FIREBASE_PROJECT_ID = "maxrecord"
 FIRESTORE_APP_ID = "default-cat-app"
