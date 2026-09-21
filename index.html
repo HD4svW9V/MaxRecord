@@ -33,12 +33,22 @@
             return Math.round(num * 10) / 10;
         };
 
+        // 全角数字・全角ピリオドを半角に自動正規化
+        const normalizeNumberStr = (val) => {
+            if (val === null || val === undefined) return '';
+            return String(val)
+                .replace(/[０-９]/g, s => String.fromCharCode(s.charCodeAt(0) - 0xFEE0))
+                .replace(/[．。]/g, '.')
+                .trim();
+        };
+
         const grams = (val, fieldName = 'グラム', isOptional = false) => {
-            if (val === '' || val === null || val === undefined) {
+            const cleaned = normalizeNumberStr(val);
+            if (cleaned === '') {
                 if (isOptional) return '';
                 throw new Error(`${fieldName}を入力してください。`);
             }
-            const n = Number(val);
+            const n = Number(cleaned);
             if (!Number.isFinite(n) || n < 0) {
                 throw new Error(`${fieldName}には0以上の数値を入力してください。`);
             }
@@ -48,11 +58,24 @@
         const isPee = (type) => /おしっこ|尿|両方/.test(type || '');
         const isPoop = (type) => /うんち|うんこ|便|両方/.test(type || '');
 
-        // ごはん（器ごと計量）
-        const prepareFood = (food) => {
+        // ごはん（器ごと計量：お皿・商品名必須チェック ＆ 過去ログ互換）
+        const prepareFood = (food, isLegacy = false) => {
             const res = { ...food };
             if (!['ドライ', 'ウェット', 'その他'].includes(res.type)) {
                 res.type = 'その他';
+            }
+            res.dish = res.dish ? String(res.dish).trim() : '';
+            res.productName = res.productName ? String(res.productName).trim() : '';
+
+            // 回収（計量）で回収対象が未選択の場合
+            if (res.dryAction === 'discard' && !res.targetServeLogId) {
+                throw new Error('回収するお皿を選択してください。');
+            }
+
+            // 新規・回収時の必須チェック（過去ログ編集時は空欄でも許容）
+            if (!isLegacy) {
+                if (!res.dish) throw new Error('お皿・場所を入力してください。');
+                if (!res.productName) throw new Error('商品名・銘柄を入力してください。');
             }
 
             if (res.dryAction === 'serve') {
@@ -82,9 +105,21 @@
             return res;
         };
 
-        // お水（器ごと計量：重さ g で集計）
-        const prepareWater = (water) => {
+        // お水（器ごと計量：お皿必須チェック ＆ 過去ログ互換）
+        const prepareWater = (water, isLegacy = false) => {
             const res = { ...water };
+            res.dish = res.dish ? String(res.dish).trim() : '';
+
+            // 回収（計量）で回収対象が未選択の場合
+            if (res.waterAction === 'discard' && !res.targetServeLogId) {
+                throw new Error('回収する水入れを選択してください。');
+            }
+
+            // 新規・回収時の必須チェック（過去ログ編集時は空欄でも許容）
+            if (!isLegacy && !res.dish) {
+                throw new Error('お皿・水入れの場所を入力してください。');
+            }
+
             if (res.waterAction === 'serve') {
                 res.serveMl = grams(res.serveMl, 'セット時の重さ(器込み)');
                 res.isClosed = Boolean(res.isClosed);
@@ -105,7 +140,6 @@
                 }
                 res.drunkMl = round1(res.serveMl - res.discardMl);
             } else {
-                // 旧記録（直接入力）
                 if (res.ml !== undefined && res.ml !== '') {
                     res.ml = grams(res.ml, '飲水量 (g)', true);
                 }
@@ -147,7 +181,6 @@
                 }
             });
 
-            // 水の集計（実飲水量 g のみ集計。回数はカウントしない）
             let waterMlTotal = 0;
             let hasWaterRecord = false;
             let waterLegacyCount = 0;
@@ -195,9 +228,6 @@
             };
         };
 
-        /* ==========================================================================
-           Firebase 設定 & 定数
-           ========================================================================== */
         const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {
             apiKey: "AIzaSyAwhsXGF-wOUwYxDdNI0t4_YDdkmQ4l7Z4",
             authDomain: "maxrecord.firebaseapp.com",
@@ -209,9 +239,6 @@
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-cat-app';
         const WEEKDAYS = ['日', '月', '火', '水', '木', '金', '土'];
 
-        /* ==========================================================================
-           Vue アプリケーション
-           ========================================================================== */
         createApp({
             setup() {
                 const logs = ref([]);
@@ -222,6 +249,7 @@
                 const isOnline = ref(false);
                 const syncError = ref('');
                 const bannerNotice = ref('');
+                const bannerType = ref('success');
                 const syncedAt = ref('');
                 const filterCategory = ref('all');
                 const isSaving = ref(false);
@@ -232,9 +260,9 @@
                 let db = null;
                 let unsubscribeFirestore = null;
 
-                // 保存後の完了メッセージはテンポよく短め（1.5秒）に表示
-                const notify = (msg, duration = 1500) => {
+                const notify = (msg, duration = 1500, type = 'success') => {
                     bannerNotice.value = msg;
+                    bannerType.value = type;
                     setTimeout(() => {
                         if (bannerNotice.value === msg) bannerNotice.value = '';
                     }, duration);
@@ -242,8 +270,8 @@
 
                 const form = ref({
                     timestamp: '',
-                    food: { type: 'ドライ', note: '', dryAction: 'serve', serveGrams: '', discardGrams: '', grams: '', targetServeLogId: '' },
-                    water: { waterAction: 'serve', serveMl: '', discardMl: '', drunkMl: '', targetServeLogId: '', ml: '', note: '' },
+                    food: { type: 'ドライ', dish: '', productName: '', note: '', dryAction: 'serve', serveGrams: '', discardGrams: '', grams: '', targetServeLogId: '' },
+                    water: { waterAction: 'serve', dish: '', serveMl: '', discardMl: '', drunkMl: '', targetServeLogId: '', ml: '', note: '' },
                     toilet: { type: 'おしっこ', amount: '普通', note: '' },
                     fluid: { hasFluid: true, hasAppetiteStimulant: false, note: '' },
                     notice: { description: '' },
@@ -339,13 +367,49 @@
                     return `${month}/${day}(${dayOfWeek}) ${hours}:${minutes}`;
                 };
 
+                // 過去ログからのお皿・商品名の候補チップ抽出（直近上位5件）
+                const recentFoodDishes = computed(() => {
+                    const set = new Set();
+                    logs.value.forEach(l => {
+                        if (l.category === 'food' && l.details?.dish?.trim()) {
+                            set.add(l.details.dish.trim());
+                        }
+                    });
+                    return Array.from(set).slice(0, 5);
+                });
+
+                const recentFoodProducts = computed(() => {
+                    const set = new Set();
+                    logs.value.forEach(l => {
+                        if (l.category === 'food' && l.details?.productName?.trim()) {
+                            set.add(l.details.productName.trim());
+                        }
+                    });
+                    return Array.from(set).slice(0, 5);
+                });
+
+                const recentWaterDishes = computed(() => {
+                    const set = new Set();
+                    logs.value.forEach(l => {
+                        if (l.category === 'water' && l.details?.dish?.trim()) {
+                            set.add(l.details.dish.trim());
+                        }
+                    });
+                    return Array.from(set).slice(0, 5);
+                });
+
+                const editingOriginalLog = computed(() => {
+                    if (!editingLogId.value) return null;
+                    return logs.value.find(l => l.id === editingLogId.value) || null;
+                });
+
                 const openModal = (category) => {
                     editingLogId.value = null;
                     deletingLogId.value = null;
                     activeCategory.value = category;
                     form.value.timestamp = getCurrentDateTimeString();
-                    form.value.food = { type: 'ドライ', note: '', dryAction: 'serve', serveGrams: '', discardGrams: '', grams: '', targetServeLogId: '' };
-                    form.value.water = { waterAction: 'serve', serveMl: '', discardMl: '', drunkMl: '', targetServeLogId: '', ml: '', note: '' };
+                    form.value.food = { type: 'ドライ', dish: '', productName: '', note: '', dryAction: 'serve', serveGrams: '', discardGrams: '', grams: '', targetServeLogId: '' };
+                    form.value.water = { waterAction: 'serve', dish: '', serveMl: '', discardMl: '', drunkMl: '', targetServeLogId: '', ml: '', note: '' };
                     form.value.toilet = { type: 'おしっこ', amount: '普通', note: '' };
                     form.value.fluid = { hasFluid: true, hasAppetiteStimulant: false, note: '' };
                     form.value.notice = { description: '' };
@@ -364,6 +428,8 @@
                         form.value.food = {
                             ...log.details,
                             type: t,
+                            dish: log.details?.dish || '',
+                            productName: log.details?.productName || '',
                             dryAction: log.details?.dryAction || 'instant',
                             serveGrams: log.details?.serveGrams ?? '',
                             discardGrams: log.details?.discardGrams ?? '',
@@ -374,15 +440,16 @@
                             form.value.water = {
                                 ...log.details,
                                 waterAction: log.details.waterAction,
+                                dish: log.details?.dish || '',
                                 serveMl: log.details?.serveMl ?? '',
                                 discardMl: log.details?.discardMl ?? '',
                                 targetServeLogId: log.details?.targetServeLogId || '',
                                 note: log.details?.note || ''
                             };
                         } else {
-                            // 旧記録形式のフォールバック
                             form.value.water = {
                                 waterAction: 'legacy',
+                                dish: log.details?.dish || '',
                                 ml: log.details?.ml ?? '',
                                 note: log.details?.note || ''
                             };
@@ -415,24 +482,25 @@
                 const activeWaterServes = computed(() => logs.value.filter(l => l.category === 'water' && l.details?.waterAction === 'serve' && !l.details?.isClosed));
                 const filteredLogs = computed(() => logs.value.filter(l => filterCategory.value === 'all' || l.category === filterCategory.value));
 
-                // 配膳中のごはんを回収・計量
                 const openDiscardModal = (log) => {
                     openModal('food');
                     Object.assign(form.value.food, {
                         type: ['ドライ', 'ウェット', 'その他'].includes(log.details?.type) ? log.details.type : 'ドライ',
                         dryAction: 'discard',
                         targetServeLogId: log.id,
-                        serveGrams: log.details?.serveGrams
+                        serveGrams: log.details?.serveGrams,
+                        dish: log.details?.dish || '',
+                        productName: log.details?.productName || ''
                     });
                 };
 
-                // 給水中の水を回収・計量
                 const openDiscardWaterModal = (log) => {
                     openModal('water');
                     Object.assign(form.value.water, {
                         waterAction: 'discard',
                         targetServeLogId: log.id,
                         serveMl: log.details?.serveMl,
+                        dish: log.details?.dish || '',
                         discardMl: '',
                         note: ''
                     });
@@ -444,7 +512,7 @@
                 const saveLog = async () => {
                     if (isSaving.value) return;
                     if (!isOnline.value || !currentUser.value) {
-                        notify('サーバーへの接続を確認してから保存してください。入力内容は残っています。', 2500);
+                        notify('サーバーへの接続を確認してから保存してください。入力内容は残っています。', 3000, 'error');
                         return;
                     }
                     isSaving.value = true;
@@ -453,10 +521,14 @@
                         const timestamp = form.value.timestamp;
                         if (!timestamp || !Number.isFinite(new Date(timestamp).getTime())) throw new Error('記録日時を入力してください。');
 
+                        // 過去データ（改修前データ）を編集しているか判定（必須チェック緩和）
+                        const isLegacyFood = Boolean(editingOriginalLog.value?.category === 'food' && (!editingOriginalLog.value?.details?.dish || !editingOriginalLog.value?.details?.productName));
+                        const isLegacyWater = Boolean(editingOriginalLog.value?.category === 'water' && !editingOriginalLog.value?.details?.dish);
+
                         const details = category === 'food' 
-                            ? prepareFood(form.value.food) 
+                            ? prepareFood(form.value.food, isLegacyFood) 
                             : category === 'water' 
-                            ? prepareWater(form.value.water) 
+                            ? prepareWater(form.value.water, isLegacyWater) 
                             : { ...form.value[category] };
 
                         if (category === 'food' && ['instant', 'discard'].includes(details.dryAction)) details.effectiveDate = timestamp.slice(0, 10);
@@ -500,6 +572,10 @@
                                     throw new Error('この配膳はすでに回収済みです。');
                                 }
                                 d.serveGrams = target.details?.serveGrams;
+                                d.dish = target.details?.dish || d.dish || '';
+                                d.productName = target.details?.productName || d.productName || '';
+                                if (!d.dish) throw new Error('お皿・場所を入力してください。');
+                                if (!d.productName) throw new Error('商品名・銘柄を入力してください。');
                                 if (d.discardGrams > d.serveGrams) throw new Error('回収時の重さがセット時を超えています。');
                                 d.eatenGrams = round1(d.serveGrams - d.discardGrams);
                             }
@@ -515,6 +591,8 @@
                                     throw new Error('この給水はすでに回収済みです。');
                                 }
                                 d.serveMl = target.details?.serveMl;
+                                d.dish = target.details?.dish || d.dish || '';
+                                if (!d.dish) throw new Error('お皿・水入れの場所を入力してください。');
                                 if (d.discardMl > d.serveMl) throw new Error('回収時の重さがセット時を超えています。');
                                 d.drunkMl = round1(d.serveMl - d.discardMl);
                             }
@@ -526,9 +604,9 @@
 
                         activeCategory.value = null;
                         editingLogId.value = null;
-                        notify('記録を保存しました ✨');
+                        notify('記録を保存しました ✨', 1500, 'success');
                     } catch (e) {
-                        notify(e.message || '保存できませんでした。入力内容は残っています。', 2500);
+                        notify(e.message || '保存できませんでした。入力内容は残っています。', 3000, 'error');
                     } finally {
                         isSaving.value = false;
                     }
@@ -536,7 +614,7 @@
 
                 const executeDeleteLog = async (id) => {
                     if (isSaving.value || !isOnline.value) {
-                        notify('接続を確認してから操作してください。', 2000);
+                        notify('接続を確認してから操作してください。', 2500, 'error');
                         return;
                     }
                     isSaving.value = true;
@@ -567,9 +645,9 @@
                             tx.delete(ref);
                         });
                         deletingLogId.value = null;
-                        notify('記録を削除しました。');
+                        notify('記録を削除しました。', 1500, 'success');
                     } catch (e) {
-                        notify(e.message || '削除できませんでした。', 2500);
+                        notify(e.message || '削除できませんでした。', 2500, 'error');
                     } finally {
                         isSaving.value = false;
                     }
@@ -605,6 +683,8 @@
                     if (l) {
                         form.value.food.serveGrams = l.details?.serveGrams ?? '';
                         form.value.food.type = l.details?.type || form.value.food.type;
+                        form.value.food.dish = l.details?.dish || form.value.food.dish;
+                        form.value.food.productName = l.details?.productName || form.value.food.productName;
                     }
                 };
 
@@ -612,12 +692,14 @@
                     const l = activeWaterServes.value.find(l => l.id === form.value.water.targetServeLogId);
                     if (l) {
                         form.value.water.serveMl = l.details?.serveMl ?? '';
+                        form.value.water.dish = l.details?.dish || form.value.water.dish;
                     }
                 };
 
                 const foodPreview = computed(() => {
                     try {
-                        const d = prepareFood(form.value.food);
+                        const isLegacyFood = Boolean(editingOriginalLog.value?.category === 'food' && (!editingOriginalLog.value?.details?.dish || !editingOriginalLog.value?.details?.productName));
+                        const d = prepareFood(form.value.food, isLegacyFood);
                         return d.eatenGrams === undefined ? '—' : `${d.eatenGrams} g`;
                     } catch {
                         return '入力値を確認してください';
@@ -626,14 +708,14 @@
 
                 const waterPreview = computed(() => {
                     try {
-                        const d = prepareWater(form.value.water);
+                        const isLegacyWater = Boolean(editingOriginalLog.value?.category === 'water' && !editingOriginalLog.value?.details?.dish);
+                        const d = prepareWater(form.value.water, isLegacyWater);
                         return d.drunkMl === undefined ? '—' : `${d.drunkMl} g`;
                     } catch {
                         return '入力値を確認してください';
                     }
                 });
 
-                // トイレ・異変（右軸の回数系）
                 const countSeries = [
                     { key: 'pee', label: 'おしっこ (回)', color: '#ca8a04' },
                     { key: 'poop', label: 'うんこ (回)', color: '#92400e' },
@@ -656,7 +738,6 @@
                                 return extra ? [dateWithDay, extra] : dateWithDay;
                             }),
                             datasets: [
-                                // ごはん実食：積み上げ棒グラフ（左軸 grams: g）
                                 {
                                     type: 'bar',
                                     label: 'ドライ実食 (g)',
@@ -695,7 +776,6 @@
                                     borderSkipped: false,
                                     order: 2
                                 },
-                                // 水実飲水量 (g) - 左軸に折れ線（シアン・点線）でオーバーレイ
                                 {
                                     type: 'line',
                                     label: '水 実飲水量 (g)',
@@ -712,7 +792,6 @@
                                     pointHoverRadius: 6.5,
                                     order: 1
                                 },
-                                // 回数系折れ線グラフ（右軸 counts: トイレ・異変）
                                 ...countSeries.map(s => ({
                                     type: 'line',
                                     label: s.label,
@@ -805,7 +884,7 @@
 
                 const printReport = async () => {
                     if (!isOnline.value || !syncedAt.value) {
-                        notify('最新データの取得後に印刷してください。', 2000);
+                        notify('最新データの取得後に印刷してください。', 2500, 'error');
                         return;
                     }
                     await nextTick();
@@ -815,11 +894,11 @@
                 return {
                     categories, weekly, todayHealth, recentNotes, selectServe, selectWaterServe, foodPreview, waterPreview, printReport,
                     reportRows, countSeries, reportX, reportY, reportYWater, reportSegments, reportWaterSegments, maxGrams, maxCounts,
-                    syncError, bannerNotice, syncedAt, filterCategory, filteredLogs, activeServes, activeWaterServes,
+                    syncError, bannerNotice, bannerType, syncedAt, filterCategory, filteredLogs, activeServes, activeWaterServes,
                     openDiscardModal, openDiscardWaterModal, setNowToForm, round1,
                     logs, currentTab, activeCategory, editingLogId, deletingLogId, form, todayStr,
                     isOnline, isSaving, openModal, openEditModal, closeModal, saveLog, executeDeleteLog,
-                    formatTime, formatMMDDDay
+                    formatTime, formatMMDDDay, recentFoodDishes, recentFoodProducts, recentWaterDishes
                 };
             }
         }).mount('#app');
@@ -828,13 +907,16 @@
 
 <body class="bg-slate-50 min-h-screen text-slate-800 pb-16 antialiased selection:bg-amber-200">
     <div id="app" v-cloak class="max-w-md mx-auto px-4 py-6">
-        <!-- 通知バナー（短時間表示: 1.5秒） -->
-        <div v-if="bannerNotice" class="no-print fixed top-4 left-4 right-4 z-50 max-w-md mx-auto bg-slate-900/90 text-white text-xs py-2 px-3.5 rounded-xl shadow-lg flex items-center justify-between transition animate-slide-up">
+        <!-- 通知バナー（最前面 z-[70]） -->
+        <div v-if="bannerNotice" 
+             class="no-print fixed top-4 left-4 right-4 z-[70] max-w-md mx-auto text-white text-xs py-2.5 px-3.5 rounded-xl shadow-2xl flex items-center justify-between transition animate-slide-up border"
+             :class="bannerType === 'error' ? 'bg-rose-900/95 border-rose-500/60 shadow-rose-950/40' : 'bg-slate-900/95 border-slate-700/50 shadow-black/40'">
             <div class="flex items-center gap-2">
-                <i class="fa-solid fa-circle-check text-emerald-400"></i>
-                <span>{{ bannerNotice }}</span>
+                <i v-if="bannerType === 'error'" class="fa-solid fa-triangle-exclamation text-rose-300 text-sm"></i>
+                <i v-else class="fa-solid fa-circle-check text-emerald-400 text-sm"></i>
+                <span class="font-medium tracking-wide">{{ bannerNotice }}</span>
             </div>
-            <button @click="bannerNotice = ''" class="ml-2 text-slate-400 hover:text-white p-0.5"><i class="fa-solid fa-xmark"></i></button>
+            <button @click="bannerNotice = ''" class="ml-2 text-slate-300 hover:text-white p-0.5"><i class="fa-solid fa-xmark"></i></button>
         </div>
 
         <!-- ヘッダー -->
@@ -867,7 +949,7 @@
 
         <!-- ================= タブ1: 記録・履歴 ================= -->
         <div v-show="currentTab === 'input'" class="no-print">
-            <!-- 【スリム化】配膳中ごはんカード -->
+            <!-- 配膳中ごはんカード（スリムデザイン維持・お皿/商品名バッジ付き） -->
             <div v-for="serve in activeServes" :key="serve.id" 
                 class="text-white rounded-xl py-2 px-3 mb-2 flex justify-between items-center gap-2 shadow-sm transition"
                 :class="{
@@ -879,8 +961,13 @@
                     <div class="flex items-center gap-1.5 flex-wrap">
                         <strong class="text-xs font-bold whitespace-nowrap">🍽️ {{ serve.details.type || 'ごはん' }}配膳中</strong>
                         <span class="text-[11px] font-semibold bg-black/15 px-1.5 py-0.2 rounded">器込 {{ serve.details.serveGrams }}g</span>
+                        <span v-if="serve.details.dish" class="text-[10px] bg-white/20 px-1.5 py-0.5 rounded font-medium">🥣 {{ serve.details.dish }}</span>
                     </div>
-                    <p class="text-[10px] opacity-90 truncate mt-0.5">セット: {{ formatTime(serve.timestamp) }} <span v-if="serve.details.note">・{{ serve.details.note }}</span></p>
+                    <p class="text-[10px] opacity-90 truncate mt-0.5">
+                        <span v-if="serve.details.productName" class="font-bold mr-1">🏷️ {{ serve.details.productName }}</span>
+                        <span>セット: {{ formatTime(serve.timestamp) }}</span>
+                        <span v-if="serve.details.note">・{{ serve.details.note }}</span>
+                    </p>
                 </div>
                 <button @click="openDiscardModal(serve)" 
                     class="shrink-0 rounded-lg px-2.5 py-1 text-xs font-bold shadow-sm active:scale-95 transition bg-white"
@@ -893,15 +980,19 @@
                 </button>
             </div>
 
-            <!-- 【スリム化】給水中カード（水入れ） -->
+            <!-- 給水中カード（スリムデザイン維持・お皿バッジ付き） -->
             <div v-for="wServe in activeWaterServes" :key="wServe.id" 
                 class="text-white rounded-xl py-2 px-3 mb-2.5 flex justify-between items-center gap-2 shadow-sm transition bg-gradient-to-r from-cyan-600 to-sky-500">
                 <div class="min-w-0 flex-1">
                     <div class="flex items-center gap-1.5 flex-wrap">
                         <strong class="text-xs font-bold whitespace-nowrap">💧 お水給水中</strong>
                         <span class="text-[11px] font-semibold bg-black/15 px-1.5 py-0.2 rounded">器込 {{ wServe.details.serveMl }}g</span>
+                        <span v-if="wServe.details.dish" class="text-[10px] bg-white/20 px-1.5 py-0.5 rounded font-medium">🥣 {{ wServe.details.dish }}</span>
                     </div>
-                    <p class="text-[10px] opacity-90 truncate mt-0.5">セット: {{ formatTime(wServe.timestamp) }} <span v-if="wServe.details.note">・{{ wServe.details.note }}</span></p>
+                    <p class="text-[10px] opacity-90 truncate mt-0.5">
+                        <span>セット: {{ formatTime(wServe.timestamp) }}</span>
+                        <span v-if="wServe.details.note">・{{ wServe.details.note }}</span>
+                    </p>
                 </div>
                 <button @click="openDiscardWaterModal(wServe)" 
                     class="shrink-0 rounded-lg px-2.5 py-1 text-xs font-bold shadow-sm active:scale-95 transition bg-white text-cyan-700">
@@ -923,7 +1014,7 @@
                 </button>
             </div>
 
-            <!-- 今日の記録まとめ（水は実飲水量gのみ表示、回数はなし） -->
+            <!-- 今日の記録まとめ -->
             <section class="bg-amber-100/60 rounded-2xl p-3.5 mb-6 text-amber-900 border border-amber-200/50">
                 <h2 class="text-xs font-bold uppercase tracking-wider text-amber-700 mb-2">今日の記録まとめ ({{ todayStr }})</h2>
                 <div class="grid grid-cols-4 gap-1.5 text-center text-xs">
@@ -939,7 +1030,6 @@
                         </div>
                         <span v-if="todayHealth.legacy" class="block text-[9px] text-slate-400">旧 {{ todayHealth.legacy }}回</span>
                     </div>
-                    <!-- 水実飲水量（回数なし・g表示） -->
                     <div class="bg-white/80 rounded-lg p-1.5 flex flex-col justify-between">
                         <span class="block text-slate-500 text-[10px]">水 実飲水量</span>
                         <div>
@@ -1014,6 +1104,10 @@
 
                             <!-- ごはんログ表示 -->
                             <div v-if="log.category === 'food'" class="text-xs text-slate-700 space-y-0.5">
+                                <div v-if="log.details?.dish || log.details?.productName" class="flex gap-1.5 flex-wrap items-center mb-1">
+                                    <span v-if="log.details?.dish" class="bg-amber-50 text-amber-800 border border-amber-200 px-1.5 py-0.5 rounded text-[10px] font-semibold">🥣 {{ log.details.dish }}</span>
+                                    <span v-if="log.details?.productName" class="bg-orange-50 text-orange-800 border border-orange-200 px-1.5 py-0.5 rounded text-[10px] font-semibold">🏷️ {{ log.details.productName }}</span>
+                                </div>
                                 <p><span class="text-slate-400">種類:</span> <span class="font-semibold">{{ log.details?.type || 'ドライ' }}</span></p>
                                 <template v-if="log.details?.dryAction">
                                     <p v-if="log.details.dryAction==='serve'" class="font-bold text-orange-600">
@@ -1034,6 +1128,9 @@
 
                             <!-- 水ログ表示 -->
                             <div v-else-if="log.category === 'water'" class="text-xs text-slate-700 space-y-0.5">
+                                <div v-if="log.details?.dish" class="flex gap-1.5 flex-wrap items-center mb-1">
+                                    <span class="bg-cyan-50 text-cyan-800 border border-cyan-200 px-1.5 py-0.5 rounded text-[10px] font-semibold">🥣 {{ log.details.dish }}</span>
+                                </div>
                                 <template v-if="log.details?.waterAction">
                                     <p v-if="log.details.waterAction==='serve'" class="font-bold text-cyan-600">
                                         器込 {{ log.details.serveMl }}g 給水セット（{{ log.details.isClosed ? '回収済' : '給水中' }}）
@@ -1108,14 +1205,14 @@
                 </button>
             </div>
 
-            <!-- 週間グラフ（ごはん積み上げ棒 + 水実飲水量点線折れ線 + 回数折れ線） -->
+            <!-- 週間グラフ -->
             <section class="bg-white p-4 rounded-2xl border border-slate-100 shadow-sm">
                 <div class="relative h-64">
                     <canvas id="integratedChart"></canvas>
                 </div>
             </section>
 
-            <!-- 週間数値表（水は実飲水量gのみ） -->
+            <!-- 週間数値表 -->
             <section class="bg-white p-3.5 rounded-2xl border border-slate-100 shadow-sm overflow-x-auto">
                 <table class="w-full text-[11px] whitespace-nowrap">
                     <thead>
@@ -1192,7 +1289,7 @@
                     <text x="1080" :y="209-n*36.25" font-size="10">{{ round1(maxCounts*n/4) }}</text>
                 </g>
                 
-                <!-- ごはん実食 積み上げ棒グラフ（ドライ=薄橙, ウェット=薄紫, その他=薄緑） -->
+                <!-- ごはん実食 積み上げ棒グラフ -->
                 <g v-for="(d, i) in weekly">
                     <template v-if="d.food != null && d.food > 0">
                         <rect v-if="d.dry > 0" :x="reportX(i) - 14" :y="205 - (d.dry / maxGrams) * 145" width="28" :height="(d.dry / maxGrams) * 145" fill="#fdba74" rx="1"/>
@@ -1201,7 +1298,7 @@
                     </template>
                 </g>
 
-                <!-- 水実飲水量 折れ線（シアン・点線：左軸 g） -->
+                <!-- 水実飲水量 折れ線 -->
                 <g>
                     <line v-for="seg in reportWaterSegments()" :key="'water-seg-'+seg.i" :x1="reportX(seg.i)" :x2="reportX(seg.i+1)" :y1="reportYWater(seg.a)" :y2="reportYWater(seg.b)" stroke="#06b6d4" stroke-width="2" stroke-dasharray="4 3"/>
                     <template v-for="(d,i) in weekly">
@@ -1209,7 +1306,7 @@
                     </template>
                 </g>
 
-                <!-- 折れ線グラフ（尿、便、異変：右軸 回数・件数） -->
+                <!-- 折れ線グラフ（尿、便、異変） -->
                 <g v-for="s in countSeries" :key="'counts-'+s.key">
                     <line v-for="seg in reportSegments(s.key)" :key="s.key+seg.i" :x1="reportX(seg.i)" :x2="reportX(seg.i+1)" :y1="reportY(seg.a,s.key)" :y2="reportY(seg.b,s.key)" :stroke="s.color" stroke-width="2.5"/>
                     <template v-for="(d,i) in weekly">
@@ -1236,10 +1333,11 @@
             </div>
         </div>
 
-        <!-- ================= 入力モーダル ================= -->
+        <!-- ================= 入力モーダル（Sticky Footer構造） ================= -->
         <div v-if="activeCategory" class="no-print fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
-            <div class="bg-white w-full max-w-md rounded-t-3xl sm:rounded-3xl p-5 shadow-xl animate-slide-up max-h-[90vh] overflow-y-auto">
-                <div class="flex justify-between items-center mb-4 pb-2 border-b border-slate-100">
+            <div class="bg-white w-full max-w-md rounded-t-3xl sm:rounded-3xl shadow-2xl animate-slide-up max-h-[90vh] flex flex-col overflow-hidden">
+                <!-- 固定ヘッダー -->
+                <div class="flex justify-between items-center px-5 pt-4 pb-3 border-b border-slate-100 shrink-0 bg-white">
                     <h3 class="font-bold text-slate-800 text-lg flex items-center gap-2">
                         <span v-if="editingLogId">✏️ 記録を編集</span>
                         <span v-else-if="activeCategory === 'food'">🍚 ごはんを記録</span>
@@ -1254,200 +1352,277 @@
                     </button>
                 </div>
 
-                <div class="mb-4">
-                    <div class="flex justify-between">
-                        <label class="block text-xs font-bold text-slate-500 mb-1">日時</label>
-                        <button @click="setNowToForm" class="text-xs text-amber-700 font-bold">現在時刻</button>
-                    </div>
-                    <input type="datetime-local" v-model="form.timestamp" class="w-full text-xs border border-slate-200 rounded-xl p-2.5 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-amber-400">
-                </div>
-
-                <!-- ごはんフォーム（器ごと計量） -->
-                <div v-if="activeCategory === 'food'" class="space-y-4">
+                <!-- スクロール可能なフォーム領域 -->
+                <div class="flex-1 overflow-y-auto px-5 py-4 space-y-4">
                     <div>
-                        <label class="block text-xs font-bold text-slate-600 mb-1.5">ごはんの種類</label>
-                        <div class="grid grid-cols-3 gap-2">
-                            <button v-for="type in ['ドライ', 'ウェット', 'その他']" :key="type"
-                                type="button" @click="form.food.type = type" :disabled="Boolean(editingLogId)"
-                                class="py-2.5 px-2 text-xs rounded-xl border font-bold transition text-center"
-                                :class="{
-                                    'bg-orange-500 text-white border-orange-500 shadow-sm': form.food.type === type && type === 'ドライ',
-                                    'bg-violet-600 text-white border-violet-600 shadow-sm': form.food.type === type && type === 'ウェット',
-                                    'bg-emerald-600 text-white border-emerald-600 shadow-sm': form.food.type === type && type === 'その他',
-                                    'bg-slate-50 text-slate-700 border-slate-200': form.food.type !== type
-                                }">
-                                {{ type }}
-                            </button>
+                        <div class="flex justify-between">
+                            <label class="block text-xs font-bold text-slate-500 mb-1">日時</label>
+                            <button @click="setNowToForm" class="text-xs text-amber-700 font-bold">現在時刻</button>
                         </div>
+                        <input type="datetime-local" v-model="form.timestamp" class="w-full text-xs border border-slate-200 rounded-xl p-2.5 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-amber-400">
                     </div>
 
-                    <!-- セット / 回収 / まとめて入力 -->
-                    <div class="p-3.5 bg-orange-50 rounded-2xl border border-orange-100 space-y-3">
-                        <div class="flex gap-1">
-                            <button v-for="action in [{id:'serve',label:'① セット (配膳)'},{id:'discard',label:'② 回収 (計量)'},{id:'instant',label:'まとめて入力'}]" :key="action.id"
-                                :disabled="Boolean(editingLogId)" @click="form.food.dryAction=action.id" 
-                                class="flex-1 rounded-xl text-xs py-2 border font-bold transition" 
-                                :class="form.food.dryAction===action.id?'bg-orange-500 text-white border-orange-500 shadow-sm':'bg-white text-slate-700 border-orange-200'">
-                                {{ action.label }}
-                            </button>
-                        </div>
-                        <div v-if="form.food.dryAction==='discard' && !editingLogId">
-                            <label class="text-xs font-bold text-slate-600">回収するお皿</label>
-                            <select v-model="form.food.targetServeLogId" @change="selectServe" class="w-full rounded-xl border border-orange-200 p-2 text-xs bg-white mt-1">
-                                <option value="">選択してください</option>
-                                <option v-for="serve in activeServes" :key="serve.id" :value="serve.id">
-                                    {{ formatTime(serve.timestamp) }} [{{ serve.details.type || 'ドライ' }}] 器込{{ serve.details.serveGrams }}g {{ serve.details.note }}
-                                </option>
-                            </select>
-                        </div>
-                        <label class="block text-xs font-bold text-slate-700">
-                            セット時の重さ（器込み g）
-                            <input v-model="form.food.serveGrams" :readonly="form.food.dryAction==='discard'" type="text" inputmode="decimal" class="w-full border border-orange-200 rounded-xl p-2.5 mt-1 bg-white" placeholder="例: 120.5">
-                        </label>
-                        <template v-if="form.food.dryAction!=='serve'">
-                            <label class="block text-xs font-bold text-slate-700">
-                                回収時の重さ（器込み g）
-                                <input v-model="form.food.discardGrams" type="text" inputmode="decimal" class="w-full border border-orange-200 rounded-xl p-2.5 mt-1 bg-white" placeholder="食べた後の器の重さ">
-                            </label>
-                            <div class="p-2.5 bg-white rounded-xl border border-orange-200">
-                                <p class="text-xs font-bold text-orange-700">実食量 (差分): {{ foodPreview }}</p>
-                                <p class="text-[10px] text-slate-400 mt-0.5">※回収・計量日時の集計に算入されます</p>
+                    <!-- ごはんフォーム（器ごと計量・お皿＆商品名必須・履歴チップ・回収時固定） -->
+                    <div v-if="activeCategory === 'food'" class="space-y-4">
+                        <div>
+                            <label class="block text-xs font-bold text-slate-600 mb-1.5">ごはんの種類</label>
+                            <div class="grid grid-cols-3 gap-2">
+                                <button v-for="type in ['ドライ', 'ウェット', 'その他']" :key="type"
+                                    type="button" @click="form.food.type = type" :disabled="Boolean(editingLogId)"
+                                    class="py-2.5 px-2 text-xs rounded-xl border font-bold transition text-center"
+                                    :class="{
+                                        'bg-orange-500 text-white border-orange-500 shadow-sm': form.food.type === type && type === 'ドライ',
+                                        'bg-violet-600 text-white border-violet-600 shadow-sm': form.food.type === type && type === 'ウェット',
+                                        'bg-emerald-600 text-white border-emerald-600 shadow-sm': form.food.type === type && type === 'その他',
+                                        'bg-slate-50 text-slate-700 border-slate-200': form.food.type !== type
+                                    }">
+                                    {{ type }}
+                                </button>
                             </div>
-                        </template>
-                    </div>
-
-                    <div>
-                        <label class="block text-xs font-bold text-slate-600 mb-1">備考</label>
-                        <input type="text" v-model="form.food.note" placeholder="例: トッピング追加など" class="w-full text-xs border border-slate-200 rounded-xl p-2.5 focus:outline-none focus:ring-2 focus:ring-amber-400">
-                    </div>
-                </div>
-
-                <!-- 水フォーム（器ごと計量：重さ g） -->
-                <div v-if="activeCategory === 'water'" class="space-y-4">
-                    <!-- 旧記録編集用のフォールバック -->
-                    <div v-if="form.water.waterAction === 'legacy'" class="p-3.5 bg-cyan-50 rounded-2xl border border-cyan-100 space-y-3">
-                        <p class="text-xs font-bold text-cyan-800">旧記録（直接入力）の編集</p>
-                        <label class="block text-xs font-bold text-slate-700">
-                            飲水量 (g)
-                            <input v-model="form.water.ml" type="text" inputmode="decimal" class="w-full border border-cyan-200 rounded-xl p-2.5 mt-1 bg-white" placeholder="例: 25">
-                        </label>
-                    </div>
-                    <!-- 新規または器ごと計量形式 -->
-                    <div v-else class="p-3.5 bg-cyan-50 rounded-2xl border border-cyan-100 space-y-3">
-                        <div class="flex gap-1">
-                            <button v-for="action in [{id:'serve',label:'① セット (給水)'},{id:'discard',label:'② 回収 (計量)'},{id:'instant',label:'まとめて入力'}]" :key="action.id"
-                                :disabled="Boolean(editingLogId)" @click="form.water.waterAction=action.id" 
-                                class="flex-1 rounded-xl text-xs py-2 border font-bold transition" 
-                                :class="form.water.waterAction===action.id?'bg-cyan-500 text-white border-cyan-500 shadow-sm':'bg-white text-slate-700 border-cyan-200'">
-                                {{ action.label }}
-                            </button>
                         </div>
-                        <div v-if="form.water.waterAction==='discard' && !editingLogId">
-                            <label class="text-xs font-bold text-slate-600">回収する水入れ</label>
-                            <select v-model="form.water.targetServeLogId" @change="selectWaterServe" class="w-full rounded-xl border border-cyan-200 p-2 text-xs bg-white mt-1">
-                                <option value="">選択してください</option>
-                                <option v-for="serve in activeWaterServes" :key="serve.id" :value="serve.id">
-                                    {{ formatTime(serve.timestamp) }} 器込{{ serve.details.serveMl }}g {{ serve.details.note }}
-                                </option>
-                            </select>
-                        </div>
-                        <label class="block text-xs font-bold text-slate-700">
-                            セット時の重さ（器込み g）
-                            <input v-model="form.water.serveMl" :readonly="form.water.waterAction==='discard'" type="text" inputmode="decimal" class="w-full border border-cyan-200 rounded-xl p-2.5 mt-1 bg-white" placeholder="水を入れた器の重さ 例: 250">
-                        </label>
-                        <template v-if="form.water.waterAction!=='serve'">
-                            <label class="block text-xs font-bold text-slate-700">
-                                回収時の重さ（器込み g）
-                                <input v-model="form.water.discardMl" type="text" inputmode="decimal" class="w-full border border-cyan-200 rounded-xl p-2.5 mt-1 bg-white" placeholder="下げる時の器の重さ">
-                            </label>
-                            <div class="p-2.5 bg-white rounded-xl border border-cyan-200">
-                                <p class="text-xs font-bold text-cyan-700">実飲水量 (差分): {{ waterPreview }}</p>
-                                <p class="text-[10px] text-slate-400 mt-0.5">※回収・計量日時の集計に算入されます</p>
+
+                        <!-- 回収モード時はお皿・商品名を固定バッジ表示（食い違い防止） -->
+                        <div v-if="form.food.dryAction === 'discard'" class="p-3 bg-amber-50/80 rounded-2xl border border-amber-200/70 text-xs">
+                            <div class="text-[10px] text-amber-800 font-bold mb-1.5 flex items-center gap-1">
+                                <i class="fa-solid fa-lock text-[9px]"></i> 配膳情報（セット時の記録を引き継ぎ）
                             </div>
-                        </template>
-                    </div>
-                    <div>
-                        <label class="block text-xs font-bold text-slate-600 mb-1">備考</label>
-                        <input type="text" v-model="form.water.note" placeholder="例: ぬるま湯、器の洗浄など" class="w-full text-xs border border-slate-200 rounded-xl p-2.5 focus:outline-none focus:ring-2 focus:ring-cyan-400">
-                    </div>
-                </div>
+                            <div class="flex gap-2 items-center flex-wrap">
+                                <span class="bg-white border border-amber-300 text-amber-900 px-2 py-0.5 rounded-lg font-semibold text-[11px]">🥣 {{ form.food.dish || '（未設定）' }}</span>
+                                <span class="bg-white border border-orange-300 text-orange-900 px-2 py-0.5 rounded-lg font-semibold text-[11px]">🏷️ {{ form.food.productName || '（未設定）' }}</span>
+                            </div>
+                        </div>
 
-                <!-- トイレフォーム -->
-                <div v-if="activeCategory === 'toilet'" class="space-y-4">
-                    <div>
-                        <label class="block text-xs font-bold text-slate-600 mb-1.5">種別</label>
-                        <div class="grid grid-cols-2 gap-2">
-                            <button v-for="tType in ['おしっこ', 'うんち']" :key="tType"
-                                type="button" @click="form.toilet.type = tType"
-                                class="py-2.5 px-3 text-xs rounded-xl border font-medium transition"
-                                :class="form.toilet.type === tType ? 'bg-amber-500 text-white border-amber-500 font-bold' : 'bg-slate-50 text-slate-700 border-slate-200'">
-                                {{ tType }}
-                            </button>
+                        <!-- 通常・セット時は入力可能（ワンタップ履歴チップ付き） -->
+                        <div v-else class="grid grid-cols-2 gap-2">
+                            <div>
+                                <label class="block text-xs font-bold text-slate-600 mb-1 flex items-center justify-between">
+                                    <span>お皿・場所</span>
+                                    <span class="text-[10px] text-rose-600 font-bold bg-rose-50 px-1.5 py-0.2 rounded border border-rose-200">必須</span>
+                                </label>
+                                <input type="text" v-model="form.food.dish" placeholder="例: 白い陶器皿" class="w-full text-xs border border-slate-200 rounded-xl p-2.5 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-amber-400">
+                                <!-- お皿履歴チップ -->
+                                <div v-if="recentFoodDishes.length > 0" class="flex flex-wrap gap-1 mt-1.5">
+                                    <button v-for="chip in recentFoodDishes" :key="chip" type="button" @click="form.food.dish = chip"
+                                        class="text-[9.5px] bg-slate-100 hover:bg-amber-100 text-slate-600 hover:text-amber-800 px-1.5 py-0.5 rounded-md border border-slate-200 transition">
+                                        {{ chip }}
+                                    </button>
+                                </div>
+                            </div>
+                            <div>
+                                <label class="block text-xs font-bold text-slate-600 mb-1 flex items-center justify-between">
+                                    <span>商品名・銘柄</span>
+                                    <span class="text-[10px] text-rose-600 font-bold bg-rose-50 px-1.5 py-0.2 rounded border border-rose-200">必須</span>
+                                </label>
+                                <input type="text" v-model="form.food.productName" placeholder="例: 腎ケア" class="w-full text-xs border border-slate-200 rounded-xl p-2.5 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-amber-400">
+                                <!-- 商品名履歴チップ -->
+                                <div v-if="recentFoodProducts.length > 0" class="flex flex-wrap gap-1 mt-1.5">
+                                    <button v-for="chip in recentFoodProducts" :key="chip" type="button" @click="form.food.productName = chip"
+                                        class="text-[9.5px] bg-slate-100 hover:bg-orange-100 text-slate-600 hover:text-orange-800 px-1.5 py-0.5 rounded-md border border-slate-200 transition">
+                                        {{ chip }}
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- セット / 回収 / まとめて入力 -->
+                        <div class="p-3.5 bg-orange-50 rounded-2xl border border-orange-100 space-y-3">
+                            <div class="flex gap-1">
+                                <button v-for="action in [{id:'serve',label:'① セット (配膳)'},{id:'discard',label:'② 回収 (計量)'},{id:'instant',label:'まとめて入力'}]" :key="action.id"
+                                    :disabled="Boolean(editingLogId)" @click="form.food.dryAction=action.id" 
+                                    class="flex-1 rounded-xl text-xs py-2 border font-bold transition" 
+                                    :class="form.food.dryAction===action.id?'bg-orange-500 text-white border-orange-500 shadow-sm':'bg-white text-slate-700 border-orange-200'">
+                                    {{ action.label }}
+                                </button>
+                            </div>
+                            <div v-if="form.food.dryAction==='discard' && !editingLogId">
+                                <label class="text-xs font-bold text-slate-600">回収するお皿</label>
+                                <select v-model="form.food.targetServeLogId" @change="selectServe" class="w-full rounded-xl border border-orange-200 p-2 text-xs bg-white mt-1">
+                                    <option value="">選択してください</option>
+                                    <option v-for="serve in activeServes" :key="serve.id" :value="serve.id">
+                                        {{ formatTime(serve.timestamp) }} [{{ serve.details.type || 'ドライ' }}]
+                                        <template v-if="serve.details.dish">皿:{{ serve.details.dish }} / </template>
+                                        <template v-if="serve.details.productName">{{ serve.details.productName }} / </template>
+                                        器込{{ serve.details.serveGrams }}g {{ serve.details.note }}
+                                    </option>
+                                </select>
+                            </div>
+                            <label class="block text-xs font-bold text-slate-700">
+                                セット時の重さ（器込み g）
+                                <input v-model="form.food.serveGrams" :readonly="form.food.dryAction==='discard'" type="text" inputmode="decimal" class="w-full border border-orange-200 rounded-xl p-2.5 mt-1 bg-white" placeholder="例: 120.5">
+                            </label>
+                            <template v-if="form.food.dryAction!=='serve'">
+                                <label class="block text-xs font-bold text-slate-700">
+                                    回収時の重さ（器込み g）
+                                    <input v-model="form.food.discardGrams" type="text" inputmode="decimal" class="w-full border border-orange-200 rounded-xl p-2.5 mt-1 bg-white" placeholder="食べた後の器の重さ">
+                                </label>
+                                <div class="p-2.5 bg-white rounded-xl border border-orange-200">
+                                    <p class="text-xs font-bold text-orange-700">実食量 (差分): {{ foodPreview }}</p>
+                                    <p class="text-[10px] text-slate-400 mt-0.5">※回収・計量日時の集計に算入されます</p>
+                                </div>
+                            </template>
+                        </div>
+
+                        <div>
+                            <label class="block text-xs font-bold text-slate-600 mb-1">備考</label>
+                            <input type="text" v-model="form.food.note" placeholder="例: トッピング追加など" class="w-full text-xs border border-slate-200 rounded-xl p-2.5 focus:outline-none focus:ring-2 focus:ring-amber-400">
                         </div>
                     </div>
-                    <div>
-                        <label class="block text-xs font-bold text-slate-600 mb-1.5">出した量</label>
-                        <div class="grid grid-cols-3 gap-2">
-                            <button v-for="amount in ['多め', '普通', '少なめ']" :key="amount"
-                                type="button" @click="form.toilet.amount = amount"
-                                class="py-2.5 px-2 text-xs rounded-xl border font-medium transition"
-                                :class="form.toilet.amount === amount ? 'bg-amber-500 text-white border-amber-500 font-bold' : 'bg-slate-50 text-slate-700 border-slate-200'">
-                                {{ amount }}
-                            </button>
+
+                    <!-- 水フォーム（器ごと計量：お皿必須・履歴チップ・回収時固定） -->
+                    <div v-if="activeCategory === 'water'" class="space-y-4">
+                        <!-- 回収モード時はお皿を固定バッジ表示（食い違い防止） -->
+                        <div v-if="form.water.waterAction === 'discard'" class="p-3 bg-cyan-50/80 rounded-2xl border border-cyan-200/70 text-xs">
+                            <div class="text-[10px] text-cyan-800 font-bold mb-1.5 flex items-center gap-1">
+                                <i class="fa-solid fa-lock text-[9px]"></i> 給水情報（セット時の記録を引き継ぎ）
+                            </div>
+                            <span class="bg-white border border-cyan-300 text-cyan-900 px-2 py-0.5 rounded-lg font-semibold text-[11px]">🥣 {{ form.water.dish || '（未設定）' }}</span>
+                        </div>
+
+                        <!-- 通常・セット時は入力可能（ワンタップ履歴チップ付き） -->
+                        <div v-else>
+                            <label class="block text-xs font-bold text-slate-600 mb-1 flex items-center justify-between">
+                                <span>お皿・水入れの場所</span>
+                                <span class="text-[10px] text-rose-600 font-bold bg-rose-50 px-1.5 py-0.2 rounded border border-rose-200">必須</span>
+                            </label>
+                            <input type="text" v-model="form.water.dish" placeholder="例: ヘルスウォーター、リビング陶器皿" class="w-full text-xs border border-slate-200 rounded-xl p-2.5 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-cyan-400">
+                            <!-- 水入れ履歴チップ -->
+                            <div v-if="recentWaterDishes.length > 0" class="flex flex-wrap gap-1 mt-1.5">
+                                <button v-for="chip in recentWaterDishes" :key="chip" type="button" @click="form.water.dish = chip"
+                                    class="text-[9.5px] bg-slate-100 hover:bg-cyan-100 text-slate-600 hover:text-cyan-800 px-1.5 py-0.5 rounded-md border border-slate-200 transition">
+                                    {{ chip }}
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- 旧記録編集用のフォールバック -->
+                        <div v-if="form.water.waterAction === 'legacy'" class="p-3.5 bg-cyan-50 rounded-2xl border border-cyan-100 space-y-3">
+                            <p class="text-xs font-bold text-cyan-800">旧記録（直接入力）の編集</p>
+                            <label class="block text-xs font-bold text-slate-700">
+                                飲水量 (g)
+                                <input v-model="form.water.ml" type="text" inputmode="decimal" class="w-full border border-cyan-200 rounded-xl p-2.5 mt-1 bg-white" placeholder="例: 25">
+                            </label>
+                        </div>
+                        <!-- 新規または器ごと計量形式 -->
+                        <div v-else class="p-3.5 bg-cyan-50 rounded-2xl border border-cyan-100 space-y-3">
+                            <div class="flex gap-1">
+                                <button v-for="action in [{id:'serve',label:'① セット (給水)'},{id:'discard',label:'② 回収 (計量)'},{id:'instant',label:'まとめて入力'}]" :key="action.id"
+                                    :disabled="Boolean(editingLogId)" @click="form.water.waterAction=action.id" 
+                                    class="flex-1 rounded-xl text-xs py-2 border font-bold transition" 
+                                    :class="form.water.waterAction===action.id?'bg-cyan-500 text-white border-cyan-500 shadow-sm':'bg-white text-slate-700 border-cyan-200'">
+                                    {{ action.label }}
+                                </button>
+                            </div>
+                            <div v-if="form.water.waterAction==='discard' && !editingLogId">
+                                <label class="text-xs font-bold text-slate-600">回収する水入れ</label>
+                                <select v-model="form.water.targetServeLogId" @change="selectWaterServe" class="w-full rounded-xl border border-cyan-200 p-2 text-xs bg-white mt-1">
+                                    <option value="">選択してください</option>
+                                    <option v-for="serve in activeWaterServes" :key="serve.id" :value="serve.id">
+                                        {{ formatTime(serve.timestamp) }}
+                                        <template v-if="serve.details?.dish">皿:{{ serve.details.dish }} / </template>
+                                        器込{{ serve.details.serveMl }}g {{ serve.details.note }}
+                                    </option>
+                                </select>
+                            </div>
+                            <label class="block text-xs font-bold text-slate-700">
+                                セット時の重さ（器込み g）
+                                <input v-model="form.water.serveMl" :readonly="form.water.waterAction==='discard'" type="text" inputmode="decimal" class="w-full border border-cyan-200 rounded-xl p-2.5 mt-1 bg-white" placeholder="水を入れた器の重さ 例: 250">
+                            </label>
+                            <template v-if="form.water.waterAction!=='serve'">
+                                <label class="block text-xs font-bold text-slate-700">
+                                    回収時の重さ（器込み g）
+                                    <input v-model="form.water.discardMl" type="text" inputmode="decimal" class="w-full border border-cyan-200 rounded-xl p-2.5 mt-1 bg-white" placeholder="下げる時の器の重さ">
+                                </label>
+                                <div class="p-2.5 bg-white rounded-xl border border-cyan-200">
+                                    <p class="text-xs font-bold text-cyan-700">実飲水量 (差分): {{ waterPreview }}</p>
+                                    <p class="text-[10px] text-slate-400 mt-0.5">※回収・計量日時の集計に算入されます</p>
+                                </div>
+                            </template>
+                        </div>
+                        <div>
+                            <label class="block text-xs font-bold text-slate-600 mb-1">備考</label>
+                            <input type="text" v-model="form.water.note" placeholder="例: ぬるま湯、器の洗浄など" class="w-full text-xs border border-slate-200 rounded-xl p-2.5 focus:outline-none focus:ring-2 focus:ring-cyan-400">
                         </div>
                     </div>
-                    <div>
-                        <label class="block text-xs font-bold text-slate-600 mb-1">備考</label>
-                        <input type="text" v-model="form.toilet.note" placeholder="例: 硬さ普通" class="w-full text-xs border border-slate-200 rounded-xl p-2.5 focus:outline-none focus:ring-2 focus:ring-amber-400">
-                    </div>
-                </div>
 
-                <!-- 補液等フォーム -->
-                <div v-if="activeCategory==='fluid'" class="space-y-3">
-                    <label class="flex justify-between items-center p-3.5 bg-sky-50 rounded-2xl text-xs font-bold text-sky-900 border border-sky-100">
-                        <span>💉 皮下輸液（補液）</span>
-                        <input type="checkbox" v-model="form.fluid.hasFluid" class="w-4 h-4 text-sky-600 rounded">
-                    </label>
-                    <label class="flex justify-between items-center p-3.5 bg-emerald-50 rounded-2xl text-xs font-bold text-emerald-900 border border-emerald-100">
-                        <span>💊 食欲増進剤</span>
-                        <input type="checkbox" v-model="form.fluid.hasAppetiteStimulant" class="w-4 h-4 text-emerald-600 rounded">
-                    </label>
-                    <div>
-                        <label class="block text-xs font-bold text-slate-600 mb-1">メモ</label>
-                        <input v-model="form.fluid.note" class="w-full text-xs p-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-400" placeholder="実施時の様子、投与量など">
-                    </div>
-                </div>
-
-                <!-- 気付きメモフォーム -->
-                <div v-if="activeCategory==='notice'">
-                    <label class="block text-xs font-bold text-slate-600 mb-1">気付きの自由メモ</label>
-                    <textarea v-model="form.notice.description" rows="4" class="w-full text-xs p-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-amber-400" placeholder="日々の様子・ご機嫌・気になる行動など"></textarea>
-                </div>
-
-                <!-- 症状フォーム -->
-                <div v-if="activeCategory === 'symptom'" class="space-y-4">
-                    <div>
-                        <label class="block text-xs font-bold text-slate-600 mb-1.5">症状の分類</label>
-                        <div class="grid grid-cols-2 gap-2">
-                            <button v-for="sType in ['嘔吐（ごはん）', '嘔吐（毛玉）', '嘔吐（胃液）', 'その他']" :key="sType"
-                                type="button" @click="form.symptom.symptomType = sType"
-                                class="py-2.5 px-2 text-xs rounded-xl border font-medium transition text-center"
-                                :class="form.symptom.symptomType === sType ? 'bg-rose-500 text-white border-rose-500 font-bold' : 'bg-slate-50 text-slate-700 border-slate-200'">
-                                {{ sType }}
-                            </button>
+                    <!-- トイレフォーム -->
+                    <div v-if="activeCategory === 'toilet'" class="space-y-4">
+                        <div>
+                            <label class="block text-xs font-bold text-slate-600 mb-1.5">種別</label>
+                            <div class="grid grid-cols-2 gap-2">
+                                <button v-for="tType in ['おしっこ', 'うんち']" :key="tType"
+                                    type="button" @click="form.toilet.type = tType"
+                                    class="py-2.5 px-3 text-xs rounded-xl border font-medium transition"
+                                    :class="form.toilet.type === tType ? 'bg-amber-500 text-white border-amber-500 font-bold' : 'bg-slate-50 text-slate-700 border-slate-200'">
+                                    {{ tType }}
+                                </button>
+                            </div>
+                        </div>
+                        <div>
+                            <label class="block text-xs font-bold text-slate-600 mb-1.5">出した量</label>
+                            <div class="grid grid-cols-3 gap-2">
+                                <button v-for="amount in ['多め', '普通', '少なめ']" :key="amount"
+                                    type="button" @click="form.toilet.amount = amount"
+                                    class="py-2.5 px-2 text-xs rounded-xl border font-medium transition"
+                                    :class="form.toilet.amount === amount ? 'bg-amber-500 text-white border-amber-500 font-bold' : 'bg-slate-50 text-slate-700 border-slate-200'">
+                                    {{ amount }}
+                                </button>
+                            </div>
+                        </div>
+                        <div>
+                            <label class="block text-xs font-bold text-slate-600 mb-1">備考</label>
+                            <input type="text" v-model="form.toilet.note" placeholder="例: 硬さ普通" class="w-full text-xs border border-slate-200 rounded-xl p-2.5 focus:outline-none focus:ring-2 focus:ring-amber-400">
                         </div>
                     </div>
-                    <div>
-                        <label class="block text-xs font-bold text-slate-600 mb-1">症状の詳細</label>
-                        <textarea v-model="form.symptom.description" rows="3" placeholder="例: 吐いた後は元気あり" class="w-full text-xs border border-slate-200 rounded-xl p-2.5 focus:outline-none focus:ring-2 focus:ring-rose-400"></textarea>
+
+                    <!-- 補液等フォーム -->
+                    <div v-if="activeCategory==='fluid'" class="space-y-3">
+                        <label class="flex justify-between items-center p-3.5 bg-sky-50 rounded-2xl text-xs font-bold text-sky-900 border border-sky-100">
+                            <span>💉 皮下輸液（補液）</span>
+                            <input type="checkbox" v-model="form.fluid.hasFluid" class="w-4 h-4 text-sky-600 rounded">
+                        </label>
+                        <label class="flex justify-between items-center p-3.5 bg-emerald-50 rounded-2xl text-xs font-bold text-emerald-900 border border-emerald-100">
+                            <span>💊 食欲増進剤</span>
+                            <input type="checkbox" v-model="form.fluid.hasAppetiteStimulant" class="w-4 h-4 text-emerald-600 rounded">
+                        </label>
+                        <div>
+                            <label class="block text-xs font-bold text-slate-600 mb-1">メモ</label>
+                            <input v-model="form.fluid.note" class="w-full text-xs p-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-400" placeholder="実施時の様子、投与量など">
+                        </div>
+                    </div>
+
+                    <!-- 気付きメモフォーム -->
+                    <div v-if="activeCategory==='notice'">
+                        <label class="block text-xs font-bold text-slate-600 mb-1">気付きの自由メモ</label>
+                        <textarea v-model="form.notice.description" rows="4" class="w-full text-xs p-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-amber-400" placeholder="日々の様子・ご機嫌・気になる行動など"></textarea>
+                    </div>
+
+                    <!-- 症状フォーム -->
+                    <div v-if="activeCategory === 'symptom'" class="space-y-4">
+                        <div>
+                            <label class="block text-xs font-bold text-slate-600 mb-1.5">症状の分類</label>
+                            <div class="grid grid-cols-2 gap-2">
+                                <button v-for="sType in ['嘔吐（ごはん）', '嘔吐（毛玉）', '嘔吐（胃液）', 'その他']" :key="sType"
+                                    type="button" @click="form.symptom.symptomType = sType"
+                                    class="py-2.5 px-2 text-xs rounded-xl border font-medium transition text-center"
+                                    :class="form.symptom.symptomType === sType ? 'bg-rose-500 text-white border-rose-500 font-bold' : 'bg-slate-50 text-slate-700 border-slate-200'">
+                                    {{ sType }}
+                                </button>
+                            </div>
+                        </div>
+                        <div>
+                            <label class="block text-xs font-bold text-slate-600 mb-1">症状の詳細</label>
+                            <textarea v-model="form.symptom.description" rows="3" placeholder="例: 吐いた後は元気あり" class="w-full text-xs border border-slate-200 rounded-xl p-2.5 focus:outline-none focus:ring-2 focus:ring-rose-400"></textarea>
+                        </div>
                     </div>
                 </div>
 
-                <!-- 保存ボタン -->
-                <button @click="saveLog" :disabled="isSaving" class="w-full mt-6 py-3 bg-amber-600 hover:bg-amber-700 text-white text-sm font-bold rounded-xl shadow-md transition active:scale-98 flex items-center justify-center gap-2">
-                    <i v-if="isSaving" class="fa-solid fa-spinner fa-spin"></i>
-                    <span>{{ isSaving ? '保存中...' : (editingLogId ? '変更を保存する' : '記録を保存する') }}</span>
-                </button>
+                <!-- 固定フッター（Sticky Footer：スクロールやキーボードに埋もれない設計） -->
+                <div class="p-4 bg-white border-t border-slate-100 shrink-0 shadow-[0_-4px_12px_rgba(0,0,0,0.03)]">
+                    <button @click="saveLog" :disabled="isSaving" class="w-full py-3 bg-amber-600 hover:bg-amber-700 text-white text-sm font-bold rounded-xl shadow-md transition active:scale-98 flex items-center justify-center gap-2">
+                        <i v-if="isSaving" class="fa-solid fa-spinner fa-spin"></i>
+                        <span>{{ isSaving ? '保存中...' : (editingLogId ? '変更を保存する' : '記録を保存する') }}</span>
+                    </button>
+                </div>
             </div>
         </div>
     </div>
