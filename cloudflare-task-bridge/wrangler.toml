@@ -1,0 +1,10 @@
+name = "maxrecord-task-bridge"
+main = "worker.mjs"
+compatibility_date = "2026-09-21"
+
+[triggers]
+crons = ["* * * * *"]
+
+[vars]
+FIREBASE_PROJECT_ID = "maxrecord"
+FIRESTORE_APP_ID = "default-cat-app"
