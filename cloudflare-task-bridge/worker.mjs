@@ -54,6 +54,7 @@ async function firebaseToken(env) {
 }
 
 const firestoreBase = env => `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(env.FIREBASE_PROJECT_ID || 'maxrecord')}/databases/(default)/documents`;
+const firestoreDocumentName = env => `projects/${env.FIREBASE_PROJECT_ID || 'maxrecord'}/databases/(default)/documents`;
 const collectionPath = env => `artifacts/${env.FIRESTORE_APP_ID || 'default-cat-app'}/public/data/cat_logs`;
 
 async function listLogs(env, token) {
@@ -89,11 +90,11 @@ async function writeRecord(env, token, task, event, logs) {
     }
   } else record.details = event.details;
 
-  const writes = [{ update: { name: `${firestoreBase(env)}/${collectionPath(env)}/${docId}`, fields: fields(record) } }];
+  const writes = [{ update: { name: `${firestoreDocumentName(env)}/${collectionPath(env)}/${docId}`, fields: fields(record) } }];
   if (target) {
     const updatedTarget = { ...target, details: { ...target.details, isClosed: true, closedBy: docId }, updatedAt: now };
     delete updatedTarget.id;
-    writes.push({ update: { name: `${firestoreBase(env)}/${collectionPath(env)}/${target.id}`, fields: fields(updatedTarget) } });
+    writes.push({ update: { name: `${firestoreDocumentName(env)}/${collectionPath(env)}/${target.id}`, fields: fields(updatedTarget) } });
   }
   const response = await fetch(`${firestoreBase(env)}:commit`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify({ writes }) });
   if (!response.ok) throw new Error(`Firestore write error: ${response.status} ${await response.text()}`);
