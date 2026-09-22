@@ -22,7 +22,7 @@
         import { createApp, ref, computed, watch, nextTick, onMounted } from "https://unpkg.com/vue@3/dist/vue.esm-browser.js";
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, collection, addDoc, deleteDoc, updateDoc, doc, onSnapshot, runTransaction } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getFirestore, collection, query, orderBy, limit, addDoc, deleteDoc, updateDoc, doc, onSnapshot, runTransaction } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         /* ==========================================================================
            ユーティリティ & 計算ロジック
@@ -304,7 +304,8 @@
                     if (unsubscribeFirestore) unsubscribeFirestore();
 
                     const colRef = collection(db, 'artifacts', appId, 'public', 'data', 'cat_logs');
-                    unsubscribeFirestore = onSnapshot(colRef, { includeMetadataChanges: true }, (snapshot) => {
+                    const q = query(colRef, orderBy('timestamp', 'desc'), limit(150));
+                    unsubscribeFirestore = onSnapshot(q, (snapshot) => {
                         const fetchedLogs = [];
                         snapshot.forEach((docSnap) => {
                             fetchedLogs.push({ id: docSnap.id, ...docSnap.data() });
@@ -841,9 +842,9 @@
 
                 const reportRows = computed(() => [
                     { key: 'food', label: 'ごはん合計 (g)', color: '#ea580c' },
-                    { key: 'dry', label: '　・ドライ (g)', color: '#ea580c' },
-                    { key: 'wet', label: '　・ウェット (g)', color: '#8b5cf6' },
-                    { key: 'other', label: '　・その他 (g)', color: '#10b981' },
+                    { key: 'dry', label: ' ・ドライ (g)', color: '#ea580c' },
+                    { key: 'wet', label: ' ・ウェット (g)', color: '#8b5cf6' },
+                    { key: 'other', label: ' ・その他 (g)', color: '#10b981' },
                     { key: 'waterMl', label: '水 実飲水量 (g)', color: '#0891b2' },
                     { key: 'pee', label: 'おしっこ (回)', color: '#ca8a04' },
                     { key: 'poop', label: 'うんこ (回)', color: '#92400e' },
