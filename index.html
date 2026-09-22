@@ -6,7 +6,7 @@
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="default">
     <meta name="theme-color" content="#92400e">
-    <title>マックスの健康日記 🐾 ver2.2</title>
+    <title>マックスの健康日記 🐾 ver2.3</title>
 
     <!-- ファビコン（SVGアイコン） -->
     <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🐾</text></svg>">
@@ -24,7 +24,7 @@
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, collection, query, orderBy, limit, addDoc, deleteDoc, updateDoc, doc, onSnapshot, runTransaction } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
-        const APP_VERSION = "ver2.2";
+        const APP_VERSION = "ver2.3";
 
         /* ==========================================================================
            ユーティリティ & 計算ロジック
@@ -247,7 +247,7 @@
                 const isSaving = ref(false);
                 const currentUser = ref(null);
 
-                // ★初期読み込み件数を200件に拡張（1週間〜約10日分の記録を確実に100%全件カバー）
+                // 初期読み込みを200件に拡張（約10〜14日分を網羅し、週間グラフを完全に表示）
                 const logLimitCount = ref(200);
                 const hasMoreLogs = ref(false);
 
@@ -308,7 +308,7 @@
                     }
                 });
 
-                // 健康記録（cat_logs）のリアルタイム購読（初期200件）
+                // 健康記録（cat_logs）のリアルタイム購読
                 const listenToFirestore = () => {
                     if (!currentUser.value) return;
                     if (unsubscribeFirestore) unsubscribeFirestore();
@@ -354,7 +354,6 @@
                     });
                 };
 
-                // 過去のログをさらに読み込む（100件ずつ拡張）
                 const loadMoreLogs = () => {
                     logLimitCount.value += 100;
                     listenToFirestore();
@@ -551,7 +550,10 @@
                         if (category === 'water' && ['instant', 'discard'].includes(details.waterAction)) details.effectiveDate = timestamp.slice(0, 10);
                         if (category === 'fluid' && details.hasFluid) details.fluidMl = grams(details.fluidMl ?? 100, '補液量');
                         if (category === 'fluid' && !details.hasFluid) details.fluidMl = '';
-                        if (category === 'fluid' && !details.hasFluid && !details.hasAppetiteStimulant && !details.note?.trim()) throw new Error('補液・食欲増進剤・メモのいずれかを入力してください。');
+                        // 補液等のバリデーション文言を「備考」に更新
+                        if (category === 'fluid' && !details.hasFluid && !details.hasAppetiteStimulant && !details.note?.trim()) {
+                            throw new Error('補液・食欲増進剤・備考のいずれかを入力してください。');
+                        }
                         if (category === 'notice' && !details.description?.trim()) throw new Error('気付きメモを入力してください。');
 
                         const now = new Date().toISOString();
@@ -951,7 +953,7 @@
             </div>
         </header>
 
-        <!-- 3タブ切り替え（記録・履歴 / 週間分析 / 音声結果） -->
+        <!-- 3タブ切り替え -->
         <div class="no-print flex bg-slate-200/80 p-1 rounded-2xl mb-5 shadow-inner gap-1">
             <button @click="currentTab = 'input'" 
                 class="flex-1 py-2 text-xs font-bold rounded-xl transition flex items-center justify-center gap-1"
@@ -1215,7 +1217,7 @@
                         </div>
                     </div>
 
-                    <!-- 過去のログ追加読み込みボタン -->
+                    <!-- 読み込み最適化：過去のログ追加ボタン -->
                     <div v-if="hasMoreLogs" class="text-center pt-2">
                         <button @click="loadMoreLogs" class="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-600 text-xs font-semibold rounded-xl transition border border-slate-200 shadow-2xs">
                             <i class="fa-solid fa-arrow-down mr-1"></i> さらに過去の記録を読み込む
@@ -1334,6 +1336,7 @@
                     class="bg-white rounded-2xl p-3.5 shadow-xs border transition flex items-start gap-3"
                     :class="item.status === 'error' ? 'border-rose-200 bg-rose-50/20' : 'border-slate-100 hover:border-slate-200'">
                     
+                    <!-- アイコン（成功=チェック、エラー=警告バッジ） -->
                     <div class="mt-0.5 w-6 h-6 rounded-full flex items-center justify-center shrink-0 text-xs font-bold"
                         :class="item.status === 'error' ? 'bg-rose-100 text-rose-600 border border-rose-300' : 'bg-emerald-100 text-emerald-600 border border-emerald-300'">
                         <i v-if="item.status === 'error'" class="fa-solid fa-triangle-exclamation text-[10px]"></i>
@@ -1341,6 +1344,7 @@
                     </div>
 
                     <div class="min-w-0 flex-1">
+                        <!-- タスクタイトル（Google Tasks風に取り消し線） -->
                         <div class="flex items-center gap-2 flex-wrap">
                             <span class="text-xs font-bold"
                                 :class="item.status === 'error' ? 'text-slate-800' : 'line-through text-slate-500 decoration-slate-400'">
@@ -1352,11 +1356,13 @@
                             </span>
                         </div>
 
+                        <!-- 詳細メモ・理由 -->
                         <p class="text-[11px] mt-1 break-words leading-relaxed"
                             :class="item.status === 'error' ? 'text-rose-700 font-medium' : 'text-slate-600'">
                             {{ item.note }}
                         </p>
 
+                        <!-- 実行日時 -->
                         <div class="text-[9.5px] text-slate-400 mt-1 flex items-center gap-1">
                             <i class="fa-regular fa-clock text-[9px]"></i>
                             <span>{{ item.displayTime || item.timestamp }}</span>
@@ -1379,6 +1385,7 @@
                     <text x="1080" :y="209-n*36.25" font-size="10">{{ round1(maxCounts*n/4) }}</text>
                 </g>
                 
+                <!-- ごはん実食 積み上げ棒グラフ -->
                 <g v-for="(d, i) in weekly">
                     <template v-if="d.food != null && d.food > 0">
                         <rect v-if="d.dry > 0" :x="reportX(i) - 14" :y="205 - (d.dry / maxGrams) * 145" width="28" :height="(d.dry / maxGrams) * 145" fill="#fdba74" rx="1"/>
@@ -1387,6 +1394,7 @@
                     </template>
                 </g>
 
+                <!-- 水実飲水量 折れ線 -->
                 <g>
                     <line v-for="seg in reportWaterSegments()" :key="'water-seg-'+seg.i" :x1="reportX(seg.i)" :x2="reportX(seg.i+1)" :y1="reportYWater(seg.a)" :y2="reportYWater(seg.b)" stroke="#06b6d4" stroke-width="2" stroke-dasharray="4 3"/>
                     <template v-for="(d,i) in weekly">
@@ -1394,6 +1402,7 @@
                     </template>
                 </g>
 
+                <!-- 折れ線グラフ（尿、便、異変） -->
                 <g v-for="s in countSeries" :key="'counts-'+s.key">
                     <line v-for="seg in reportSegments(s.key)" :key="s.key+seg.i" :x1="reportX(seg.i)" :x2="reportX(seg.i+1)" :y1="reportY(seg.a,s.key)" :y2="reportY(seg.b,s.key)" :stroke="s.color" stroke-width="2.5"/>
                     <template v-for="(d,i) in weekly">
@@ -1438,6 +1447,7 @@
                     </button>
                 </div>
 
+                <!-- スクロール可能なフォーム領域 -->
                 <div class="flex-1 overflow-y-auto px-5 py-4 space-y-4">
                     <div>
                         <div class="flex justify-between">
@@ -1447,6 +1457,7 @@
                         <input type="datetime-local" v-model="form.timestamp" class="w-full text-xs border border-slate-200 rounded-xl p-2.5 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-amber-400">
                     </div>
 
+                    <!-- ごはんフォーム -->
                     <div v-if="activeCategory === 'food'" class="space-y-4">
                         <div>
                             <label class="block text-xs font-bold text-slate-600 mb-1.5">ごはんの種類</label>
@@ -1465,6 +1476,7 @@
                             </div>
                         </div>
 
+                        <!-- 回収モード時はお皿・商品名を引き継ぎ表示 -->
                         <div v-if="form.food.dryAction === 'discard'" class="p-3 bg-amber-50/80 rounded-2xl border border-amber-200/70 text-xs">
                             <div class="text-[10px] text-amber-800 font-bold mb-1.5 flex items-center gap-1">
                                 <i class="fa-solid fa-lock text-[9px]"></i> 配膳情報（セット時の記録を引き継ぎ）
@@ -1476,6 +1488,7 @@
                             </div>
                         </div>
 
+                        <!-- 通常・セット時は入力可能（任意項目） -->
                         <div v-else class="grid grid-cols-2 gap-2">
                             <div>
                                 <label class="block text-xs font-bold text-slate-600 mb-1 flex items-center justify-between">
@@ -1505,6 +1518,7 @@
                             </div>
                         </div>
 
+                        <!-- セット / 回収 / まとめて入力 -->
                         <div class="p-3.5 bg-orange-50 rounded-2xl border border-orange-100 space-y-3">
                             <div class="flex gap-1">
                                 <button v-for="action in [{id:'serve',label:'① セット (配膳)'},{id:'discard',label:'② 回収 (計量)'},{id:'instant',label:'まとめて入力'}]" :key="action.id"
@@ -1548,6 +1562,7 @@
                         </div>
                     </div>
 
+                    <!-- 水フォーム -->
                     <div v-if="activeCategory === 'water'" class="space-y-4">
                         <div v-if="form.water.waterAction === 'discard'" class="p-3 bg-cyan-50/80 rounded-2xl border border-cyan-200/70 text-xs">
                             <div class="text-[10px] text-cyan-800 font-bold mb-1.5 flex items-center gap-1">
@@ -1619,6 +1634,7 @@
                         </div>
                     </div>
 
+                    <!-- トイレフォーム -->
                     <div v-if="activeCategory === 'toilet'" class="space-y-4">
                         <div>
                             <label class="block text-xs font-bold text-slate-600 mb-1.5">種別</label>
@@ -1648,6 +1664,7 @@
                         </div>
                     </div>
 
+                    <!-- 補液等フォーム（「備考」に統一） -->
                     <div v-if="activeCategory==='fluid'" class="space-y-3">
                         <label class="flex justify-between items-center p-3.5 bg-sky-50 rounded-2xl text-xs font-bold text-sky-900 border border-sky-100">
                             <span>💉 皮下輸液（補液）</span>
@@ -1663,16 +1680,18 @@
                             <input type="checkbox" v-model="form.fluid.hasAppetiteStimulant" class="w-4 h-4 text-emerald-600 rounded">
                         </label>
                         <div>
-                            <label class="block text-xs font-bold text-slate-600 mb-1">メモ</label>
-                            <input v-model="form.fluid.note" class="w-full text-xs p-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-400" placeholder="実施時の様子、投与量など">
+                            <label class="block text-xs font-bold text-slate-600 mb-1">備考</label>
+                            <input v-model="form.fluid.note" class="w-full text-xs p-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-400" placeholder="実施時の様子、投与箇所など">
                         </div>
                     </div>
 
+                    <!-- 気付きメモフォーム -->
                     <div v-if="activeCategory==='notice'">
                         <label class="block text-xs font-bold text-slate-600 mb-1">気付きの自由メモ</label>
                         <textarea v-model="form.notice.description" rows="4" class="w-full text-xs p-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-amber-400" placeholder="日々の様子・ご機嫌・気になる行動など"></textarea>
                     </div>
 
+                    <!-- 症状フォーム -->
                     <div v-if="activeCategory === 'symptom'" class="space-y-4">
                         <div>
                             <label class="block text-xs font-bold text-slate-600 mb-1.5">症状の分類</label>
@@ -1692,6 +1711,7 @@
                     </div>
                 </div>
 
+                <!-- 固定フッター -->
                 <div class="p-4 bg-white border-t border-slate-100 shrink-0 shadow-[0_-4px_12px_rgba(0,0,0,0.03)]">
                     <button @click="saveLog" :disabled="isSaving" class="w-full py-3 bg-amber-600 hover:bg-amber-700 text-white text-sm font-bold rounded-xl shadow-md transition active:scale-98 flex items-center justify-center gap-2">
                         <i v-if="isSaving" class="fa-solid fa-spinner fa-spin"></i>
