@@ -6,7 +6,7 @@
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="default">
     <meta name="theme-color" content="#92400e">
-    <title>マックスの健康日記 🐾</title>
+    <title>マックスの健康日記 🐾 ver2.1</title>
 
     <!-- ファビコン（SVGアイコン） -->
     <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🐾</text></svg>">
@@ -23,6 +23,8 @@
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, collection, query, orderBy, limit, addDoc, deleteDoc, updateDoc, doc, onSnapshot, runTransaction } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        const APP_VERSION = "ver2.1";
 
         /* ==========================================================================
            ユーティリティ & 計算ロジック
@@ -231,7 +233,8 @@
         createApp({
             setup() {
                 const logs = ref([]);
-                const currentTab = ref('input');
+                const voiceLogs = ref([]); // ★音声入力・タスク処理結果ログ
+                const currentTab = ref('input'); // 'input' | 'bi' | 'voice'
                 const activeCategory = ref(null);
                 const editingLogId = ref(null);
                 const deletingLogId = ref(null);
@@ -244,10 +247,15 @@
                 const isSaving = ref(false);
                 const currentUser = ref(null);
 
+                // 読み込み最適化フラグ
+                const logLimitCount = ref(70); // 初期は直近70件に絞り込み高速化
+                const hasMoreLogs = ref(false);
+
                 let integrated = null;
                 let auth = null;
                 let db = null;
                 let unsubscribeFirestore = null;
+                let unsubscribeVoiceLogs = null;
 
                 const notify = (msg, duration = 1500, type = 'success') => {
                     bannerNotice.value = msg;
@@ -289,6 +297,7 @@
                             currentUser.value = user;
                             if (user) {
                                 listenToFirestore();
+                                listenToVoiceLogs();
                             } else {
                                 isOnline.value = false;
                             }
@@ -299,12 +308,13 @@
                     }
                 });
 
+                // 健康記録（cat_logs）のリアルタイム購読（直近件数に絞り込み最適化）
                 const listenToFirestore = () => {
                     if (!currentUser.value) return;
                     if (unsubscribeFirestore) unsubscribeFirestore();
 
                     const colRef = collection(db, 'artifacts', appId, 'public', 'data', 'cat_logs');
-                    const q = query(colRef, orderBy('timestamp', 'desc'), limit(150));
+                    const q = query(colRef, orderBy('timestamp', 'desc'), limit(logLimitCount.value));
                     unsubscribeFirestore = onSnapshot(q, (snapshot) => {
                         const fetchedLogs = [];
                         snapshot.forEach((docSnap) => {
@@ -312,6 +322,8 @@
                         });
                         fetchedLogs.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
                         logs.value = fetchedLogs;
+                        hasMoreLogs.value = snapshot.size >= logLimitCount.value;
+
                         isOnline.value = !snapshot.metadata.fromCache && !snapshot.metadata.hasPendingWrites;
                         if (isOnline.value) {
                             syncedAt.value = new Date().toLocaleString("ja-JP");
@@ -322,6 +334,30 @@
                         syncError.value = "取得できません。再読み込みしてください。";
                         isOnline.value = false;
                     });
+                };
+
+                // ★新規: 音声結果ログ（voice_task_logs）の購読
+                const listenToVoiceLogs = () => {
+                    if (!currentUser.value) return;
+                    if (unsubscribeVoiceLogs) unsubscribeVoiceLogs();
+
+                    const voiceColRef = collection(db, 'artifacts', appId, 'public', 'data', 'voice_task_logs');
+                    const vq = query(voiceColRef, orderBy('createdAt', 'desc'), limit(50));
+                    unsubscribeVoiceLogs = onSnapshot(vq, (snapshot) => {
+                        const vList = [];
+                        snapshot.forEach((docSnap) => {
+                            vList.push({ id: docSnap.id, ...docSnap.data() });
+                        });
+                        voiceLogs.value = vList;
+                    }, (err) => {
+                        console.error("Voice logs snapshot error:", err);
+                    });
+                };
+
+                // 過去のログをさらに読み込む（高速化と閲覧性の両立）
+                const loadMoreLogs = () => {
+                    logLimitCount.value += 50;
+                    listenToFirestore();
                 };
 
                 const getCurrentDateTimeString = () => {
@@ -870,13 +906,15 @@
                 };
 
                 return {
+                    APP_VERSION,
                     categories, weekly, todayHealth, recentNotes, selectServe, selectWaterServe, foodPreview, waterPreview, printReport,
                     reportRows, countSeries, reportX, reportY, reportYWater, reportSegments, reportWaterSegments, maxGrams, maxCounts,
                     syncError, bannerNotice, bannerType, syncedAt, filterCategory, filteredLogs, activeServes, activeWaterServes,
                     openDiscardModal, openDiscardWaterModal, setNowToForm, round1,
-                    logs, currentTab, activeCategory, editingLogId, deletingLogId, form, todayStr,
+                    logs, voiceLogs, currentTab, activeCategory, editingLogId, deletingLogId, form, todayStr,
                     isOnline, isSaving, openModal, openEditModal, closeModal, saveLog, executeDeleteLog,
-                    formatTime, formatMMDDDay, recentFoodDishes, recentFoodProducts, recentWaterDishes
+                    formatTime, formatMMDDDay, recentFoodDishes, recentFoodProducts, recentWaterDishes,
+                    hasMoreLogs, loadMoreLogs
                 };
             }
         }).mount('#app');
@@ -897,13 +935,16 @@
             <button @click="bannerNotice = ''" class="ml-2 text-slate-300 hover:text-white p-0.5"><i class="fa-solid fa-xmark"></i></button>
         </div>
 
-        <!-- ヘッダー -->
+        <!-- ヘッダー（ver2.1 バッジを控えめに追加） -->
         <header class="text-center mb-4">
             <h1 class="text-2xl font-bold text-amber-800 flex items-center justify-center gap-2">
                 <i class="fa-solid fa-paw text-amber-600"></i> マックスの健康日記 🐾
             </h1>
-            <div class="flex items-center justify-center gap-2 mt-1">
+            <div class="flex items-center justify-center gap-2 mt-1 flex-wrap">
                 <p class="text-xs text-slate-500">日々の記録 ＆ ヘルスケア分析</p>
+                <span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-300/60 shadow-xs">
+                    {{ APP_VERSION }}
+                </span>
                 <span class="text-[10px] px-2 py-0.5 rounded-full font-bold transition" :class="isOnline ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'">
                     <i class="fa-solid fa-arrows-rotate mr-0.5" :class="{'fa-spin': isOnline}"></i>
                     {{ isOnline ? '同期済み' : (syncError || '接続確認中・保存できません') }}
@@ -911,8 +952,8 @@
             </div>
         </header>
 
-        <!-- タブ切り替え -->
-        <div class="no-print flex bg-slate-200/80 p-1 rounded-2xl mb-5 shadow-inner">
+        <!-- 3タブ切り替え（記録・履歴 / 週間分析 / 音声結果） -->
+        <div class="no-print flex bg-slate-200/80 p-1 rounded-2xl mb-5 shadow-inner gap-1">
             <button @click="currentTab = 'input'" 
                 class="flex-1 py-2 text-xs font-bold rounded-xl transition flex items-center justify-center gap-1"
                 :class="currentTab === 'input' ? 'bg-white text-amber-800 shadow-sm' : 'text-slate-600 hover:text-slate-800'">
@@ -923,11 +964,17 @@
                 :class="currentTab === 'bi' ? 'bg-white text-amber-800 shadow-sm' : 'text-slate-600 hover:text-slate-800'">
                 <i class="fa-solid fa-chart-line"></i> 週間分析
             </button>
+            <button @click="currentTab = 'voice'" 
+                class="flex-1 py-2 text-xs font-bold rounded-xl transition flex items-center justify-center gap-1"
+                :class="currentTab === 'voice' ? 'bg-white text-amber-800 shadow-sm' : 'text-slate-600 hover:text-slate-800'">
+                <i class="fa-solid fa-microphone text-emerald-600"></i> 音声結果
+                <span v-if="voiceLogs.length > 0" class="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block"></span>
+            </button>
         </div>
 
         <!-- ================= タブ1: 記録・履歴 ================= -->
         <div v-show="currentTab === 'input'" class="no-print">
-            <!-- 配膳中ごはんカード（スリムデザイン・お皿/商品名がある場合のみバッジ表示） -->
+            <!-- 配膳中ごはんカード -->
             <div v-for="serve in activeServes" :key="serve.id" 
                 class="text-white rounded-xl py-2 px-3 mb-2 flex justify-between items-center gap-2 shadow-sm transition"
                 :class="{
@@ -958,7 +1005,7 @@
                 </button>
             </div>
 
-            <!-- 給水中カード（スリムデザイン・お皿がある場合のみバッジ表示） -->
+            <!-- 給水中カード -->
             <div v-for="wServe in activeWaterServes" :key="wServe.id" 
                 class="text-white rounded-xl py-2 px-3 mb-2.5 flex justify-between items-center gap-2 shadow-sm transition bg-gradient-to-r from-cyan-600 to-sky-500">
                 <div class="min-w-0 flex-1">
@@ -1036,6 +1083,7 @@
                     <h2 class="font-bold text-slate-700 flex items-center gap-1 text-sm">
                         <i class="fa-solid fa-clock-rotate-left text-amber-600"></i> 履歴ログ
                     </h2>
+                    <span class="text-[10px] text-slate-400">直近 {{ filteredLogs.length }} 件表示中</span>
                 </div>
 
                 <div class="flex gap-1 overflow-x-auto pb-3 text-[11px]">
@@ -1167,6 +1215,13 @@
                             </button>
                         </div>
                     </div>
+
+                    <!-- 読み込み最適化：過去のログ追加ボタン -->
+                    <div v-if="hasMoreLogs" class="text-center pt-2">
+                        <button @click="loadMoreLogs" class="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-600 text-xs font-semibold rounded-xl transition border border-slate-200 shadow-2xs">
+                            <i class="fa-solid fa-arrow-down mr-1"></i> さらに過去の記録を読み込む
+                        </button>
+                    </div>
                 </div>
             </section>
         </div>
@@ -1254,9 +1309,71 @@
             </section>
         </div>
 
+        <!-- ================= タブ3: 音声結果 (Google Tasks 連携ログ) ================= -->
+        <div v-show="currentTab === 'voice'" class="space-y-4 no-print animate-slide-up">
+            <div class="bg-slate-100/80 rounded-2xl p-3 border border-slate-200/80 flex items-center justify-between">
+                <div>
+                    <h2 class="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+                        <i class="fa-solid fa-satellite-dish text-emerald-600"></i> Google Tasks 音声自動連携ログ
+                    </h2>
+                    <p class="text-[10px] text-slate-400 mt-0.5">音声入力されたタスクの判定結果・成否を家族で確認できます</p>
+                </div>
+                <span class="text-[10px] font-bold px-2 py-0.5 bg-emerald-100 text-emerald-700 rounded-full">
+                    直近 {{ voiceLogs.length }} 件
+                </span>
+            </div>
+
+            <div v-if="voiceLogs.length === 0" class="text-center py-12 bg-white/70 rounded-2xl border border-dashed border-slate-200">
+                <i class="fa-solid fa-microphone-lines text-2xl text-slate-300 mb-2 block"></i>
+                <p class="text-slate-400 text-xs font-medium">まだ音声タスクの記録はありません</p>
+                <p class="text-slate-400 text-[10px] mt-1">「マックス 配膳 180 ラベンダー」等と話しかけるとここに成否が記録されます</p>
+            </div>
+
+            <!-- Googleタスク風のタスク完了カード一覧 -->
+            <div v-else class="space-y-2.5">
+                <div v-for="item in voiceLogs" :key="item.id" 
+                    class="bg-white rounded-2xl p-3.5 shadow-xs border transition flex items-start gap-3"
+                    :class="item.status === 'error' ? 'border-rose-200 bg-rose-50/20' : 'border-slate-100 hover:border-slate-200'">
+                    
+                    <!-- アイコン（成功=チェック、エラー=警告バッジ） -->
+                    <div class="mt-0.5 w-6 h-6 rounded-full flex items-center justify-center shrink-0 text-xs font-bold"
+                        :class="item.status === 'error' ? 'bg-rose-100 text-rose-600 border border-rose-300' : 'bg-emerald-100 text-emerald-600 border border-emerald-300'">
+                        <i v-if="item.status === 'error'" class="fa-solid fa-triangle-exclamation text-[10px]"></i>
+                        <i v-else class="fa-solid fa-check text-[11px]"></i>
+                    </div>
+
+                    <div class="min-w-0 flex-1">
+                        <!-- タスクタイトル（Google Tasks風に取り消し線） -->
+                        <div class="flex items-center gap-2 flex-wrap">
+                            <span class="text-xs font-bold"
+                                :class="item.status === 'error' ? 'text-slate-800' : 'line-through text-slate-500 decoration-slate-400'">
+                                {{ item.rawTitle }}
+                            </span>
+                            <span class="text-[9.5px] px-1.5 py-0.2 rounded font-bold"
+                                :class="item.status === 'error' ? 'bg-rose-100 text-rose-700 border border-rose-200' : 'bg-emerald-50 text-emerald-700 border border-emerald-200'">
+                                {{ item.status === 'error' ? 'エラー・停止' : '自動登録成功' }}
+                            </span>
+                        </div>
+
+                        <!-- 詳細メモ・理由 -->
+                        <p class="text-[11px] mt-1 break-words leading-relaxed"
+                            :class="item.status === 'error' ? 'text-rose-700 font-medium' : 'text-slate-600'">
+                            {{ item.note }}
+                        </p>
+
+                        <!-- 実行日時 -->
+                        <div class="text-[9.5px] text-slate-400 mt-1 flex items-center gap-1">
+                            <i class="fa-regular fa-clock text-[9px]"></i>
+                            <span>{{ item.displayTime || item.timestamp }}</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
         <!-- ================= A4横 通院レポート印刷領域（印刷時のみ表示） ================= -->
         <div class="print-only">
-            <h2 style="font-size:18px;font-weight:bold;color:#78350f;">マックスの健康日記・通院用レポート</h2>
+            <h2 style="font-size:18px;font-weight:bold;color:#78350f;">マックスの健康日記・通院用レポート ({{ APP_VERSION }})</h2>
             <p style="font-size:10px;color:#64748b;margin-bottom:8px;">期間 {{ formatMMDDDay(weekly[0].date) }} ～ {{ formatMMDDDay(weekly[6].date) }} ／ データ取得日時 {{ syncedAt }}</p>
             <svg viewBox="0 0 1160 520" style="width:100%;height:auto" role="img" aria-label="7日間の推移と日付軸を合わせた数値表">
                 <text x="10" y="28" font-size="12">左軸：ごはん実食・水実飲水量 g</text>
