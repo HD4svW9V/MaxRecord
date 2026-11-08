@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 
-function reportApp() {
+function reportApp(subscriptions = [], watchers = []) {
     let app;
     class FixedDate extends Date {
         constructor(...args) { super(...(args.length ? args : ['2027-01-05T12:00:00'])); }
@@ -11,14 +11,22 @@ function reportApp() {
     const context = {
         Date: FixedDate, console, setInterval() {},
         ref: value => ({ value }), computed: fn => ({ get value() { return fn(); } }),
-        watch() {}, nextTick: async () => {}, onMounted() {},
+        watch: (sources, callback, options) => { if (options?.flush === 'sync') watchers.push(callback); }, nextTick: async () => {}, onMounted() {},
         createApp: options => ({ mount() { app = options.setup(); } }),
         initializeApp: () => ({}), getAuth: () => ({}), getFirestore: () => ({}),
-        Chart: { register() {} }, ChartDataLabels: {}
+        Chart: { register() {} }, ChartDataLabels: {},
+        collection: () => ({}), orderBy: () => ({}), limit: count => ({ count }),
+        query: (...args) => args.at(-1),
+        onSnapshot: (q, options, callback, error) => {
+            const sub = { q, options, callback, error, stopped: false };
+            subscriptions.push(sub);
+            return () => { sub.stopped = true; };
+        }
     };
     const html = fs.readFileSync(new URL('../index.html', import.meta.url), 'utf8');
     const script = html.match(/<script type="module">([\s\S]*?)<\/script>/)[1]
-        .replace(/^\s*import .*?;$/gm, '');
+        .replace(/^\s*import .*?;$/gm, '')
+        .replace('categories, weekly, todayHealth,', 'currentUser, listenToFirestore, categories, weekly, todayHealth,');
     vm.runInNewContext(script, context);
     return app;
 }
@@ -61,4 +69,60 @@ test('browser and PDF include the same selected data and notes', () => {
     assert.equal(app.reportNotes.value.length, 1);
     assert.equal(app.weekly.value.length, 7);
     assert.equal(app.recentNotes.value.length, 1);
+});
+
+function snapshot(rows, fromCache = false) {
+    return { size: rows.length, metadata: { fromCache, hasPendingWrites: false },
+        forEach: fn => rows.forEach((row, i) => fn({ id: String(i), data: () => row })) };
+}
+const records = (count, date) => Array.from({ length: count }, () => ({
+    category: 'toilet', timestamp: date + 'T12:00', details: { type: 'おしっこ' }
+}));
+
+test('automatically loads beyond 400 records and includes the entire first day', () => {
+    const subs = [], watchers = [];
+    const app = reportApp(subs, watchers);
+    app.currentUser.value = { uid: 'test' };
+    app.reportDays.value = 14;
+    app.listenToFirestore();
+    assert.equal(subs[0].q.count, 200);
+    assert.equal(subs[0].options.includeMetadataChanges, true);
+    subs[0].callback(snapshot(records(200, '2027-01-05'), true));
+    assert.equal(subs.length, 1);
+    assert.equal(app.isOnline.value, false);
+    subs[0].callback(snapshot(records(200, '2027-01-05')));
+    assert.equal(subs[1].q.count, 400);
+    assert.equal(subs[0].stopped, true);
+    subs[1].callback(snapshot(records(400, '2026-12-23')));
+    assert.equal(subs[2].q.count, 600);
+    assert.equal(app.isOnline.value, false);
+    assert.equal(app.syncedAt.value, '');
+    subs[2].callback(snapshot([...records(599, '2026-12-23'), ...records(1, '2026-12-22')]));
+    assert.equal(app.isOnline.value, true);
+    assert.equal(app.reportData.value[0].pee, 599);
+    assert.equal(app.hasMoreLogs.value, true);
+    // A cancelled subscription must not overwrite the complete result.
+    subs[0].callback(snapshot([]));
+    assert.equal(app.logs.value.length, 600);
+    app.reportDays.value = 7;
+    watchers.at(-1)();
+    assert.equal(app.isOnline.value, false);
+    assert.equal(app.syncedAt.value, '');
+    subs.at(-1).callback(snapshot(records(2, '2027-01-05')));
+    assert.equal(app.hasMoreLogs.value, false);
+    assert.equal(app.isOnline.value, true);
+});
+
+test('empty history completes, errors keep printing disabled', () => {
+    const subs = [];
+    const app = reportApp(subs);
+    app.currentUser.value = { uid: 'test' };
+    app.listenToFirestore();
+    subs[0].callback(snapshot([]));
+    assert.equal(app.isOnline.value, true);
+    assert.equal(app.hasMoreLogs.value, false);
+    app.listenToFirestore();
+    subs[1].error(new Error('test connection failure'));
+    assert.equal(app.isOnline.value, false);
+    assert.equal(app.syncedAt.value, '');
 });

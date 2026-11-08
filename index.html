@@ -247,7 +247,7 @@
                 const isSaving = ref(false);
                 const currentUser = ref(null);
 
-                // 初期読み込みを200件に拡張（約10〜14日分を網羅し、週間グラフを完全に表示）
+                // 選択期間の先頭日を越えるまで、取得上限を自動で拡張する
                 const logLimitCount = ref(200);
                 const hasMoreLogs = ref(false);
 
@@ -255,6 +255,7 @@
                 let auth = null;
                 let db = null;
                 let unsubscribeFirestore = null;
+                let healthSubscriptionId = 0;
                 let unsubscribeVoiceLogs = null;
 
                 const notify = (msg, duration = 1500, type = 'success') => {
@@ -312,17 +313,38 @@
                 const listenToFirestore = () => {
                     if (!currentUser.value) return;
                     if (unsubscribeFirestore) unsubscribeFirestore();
+                    const subscriptionId = ++healthSubscriptionId;
+                    const requestedLimit = logLimitCount.value;
+                    const startDate = new Date(clock.value);
+                    startDate.setDate(startDate.getDate() - (reportDays.value - 1));
+                    const requiredStart = localDate(startDate);
+                    isOnline.value = false;
+                    syncedAt.value = '';
+                    syncError.value = '選択期間の記録を読み込み中…';
 
                     const colRef = collection(db, 'artifacts', appId, 'public', 'data', 'cat_logs');
-                    const q = query(colRef, orderBy('timestamp', 'desc'), limit(logLimitCount.value));
-                    unsubscribeFirestore = onSnapshot(q, (snapshot) => {
+                    const q = query(colRef, orderBy('timestamp', 'desc'), limit(requestedLimit));
+                    unsubscribeFirestore = onSnapshot(q, { includeMetadataChanges: true }, (snapshot) => {
+                        if (subscriptionId !== healthSubscriptionId) return;
                         const fetchedLogs = [];
                         snapshot.forEach((docSnap) => {
                             fetchedLogs.push({ id: docSnap.id, ...docSnap.data() });
                         });
                         fetchedLogs.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+                        const serverReady = !snapshot.metadata.fromCache && !snapshot.metadata.hasPendingWrites;
+                        const oldestDate = fetchedLogs.at(-1)?.timestamp?.slice(0, 10);
+                        if (snapshot.size >= requestedLimit && (!oldestDate || oldestDate >= requiredStart)) {
+                            isOnline.value = false;
+                            syncedAt.value = '';
+                            syncError.value = '選択期間の記録を追加読み込み中…';
+                            if (serverReady) {
+                                logLimitCount.value = requestedLimit + 200;
+                                listenToFirestore();
+                            }
+                            return;
+                        }
                         logs.value = fetchedLogs;
-                        hasMoreLogs.value = snapshot.size >= logLimitCount.value;
+                        hasMoreLogs.value = snapshot.size >= requestedLimit;
 
                         isOnline.value = !snapshot.metadata.fromCache && !snapshot.metadata.hasPendingWrites;
                         if (isOnline.value) {
@@ -330,6 +352,7 @@
                             syncError.value = "";
                         }
                     }, (err) => {
+                        if (subscriptionId !== healthSubscriptionId) return;
                         console.error("Firestore Snapshot Error:", err);
                         syncError.value = "取得できません。再読み込みしてください。";
                         isOnline.value = false;
@@ -688,6 +711,9 @@
                 const todayHealth = computed(() => daily(logs.value, localDate(clock.value)));
 
                 const reportDays = ref(7);
+                watch([reportDays, () => localDate(clock.value)], () => {
+                    listenToFirestore();
+                }, { flush: 'sync' });
                 const weekly = computed(() => Array.from({ length: reportDays.value }, (_, i) => {
                     const d = new Date(clock.value);
                     d.setDate(d.getDate() - (reportDays.value - 1) + i);
