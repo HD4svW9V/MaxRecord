@@ -687,13 +687,14 @@
 
                 const todayHealth = computed(() => daily(logs.value, localDate(clock.value)));
 
-                const weekly = computed(() => Array.from({ length: 7 }, (_, i) => {
+                const reportDays = ref(7);
+                const weekly = computed(() => Array.from({ length: reportDays.value }, (_, i) => {
                     const d = new Date(clock.value);
-                    d.setDate(d.getDate() - 6 + i);
+                    d.setDate(d.getDate() - (reportDays.value - 1) + i);
                     return daily(logs.value, localDate(d));
                 }));
 
-                const recentNotes = computed(() => logs.value.filter(l => ['notice', 'symptom'].includes(l.category) && l.timestamp?.slice(0, 10) >= weekly.value[0].date && l.timestamp?.slice(0, 10) <= weekly.value[6].date));
+                const recentNotes = computed(() => logs.value.filter(l => ['notice', 'symptom'].includes(l.category) && l.timestamp?.slice(0, 10) >= weekly.value[0].date && l.timestamp?.slice(0, 10) <= weekly.value[reportDays.value - 1].date));
 
                 const selectServe = () => {
                     const l = activeServes.value.find(l => l.id === form.value.food.targetServeLogId);
@@ -877,6 +878,9 @@
                     });
                 }, { deep: true });
 
+                const reportData = weekly;
+                const reportNotes = recentNotes;
+
                 const reportRows = computed(() => [
                     { key: 'food', label: 'ごはん合計 (g)', color: '#ea580c' },
                     { key: 'dry', label: ' ・ドライ (g)', color: '#ea580c' },
@@ -889,13 +893,13 @@
                     { key: 'legacy', label: '旧記録 (回)', color: '#64748b' }
                 ]);
 
-                const reportX = i => 190 + i * 140;
-                const maxGrams = computed(() => Math.max(10, ...weekly.value.map(d => Math.max(d.food || 0, d.waterMl || 0))));
-                const maxCounts = computed(() => Math.max(2, ...weekly.value.flatMap(d => [d.pee, d.poop, d.symptom])));
+                const reportX = i => 190 + i * (840 / (reportDays.value - 1));
+                const maxGrams = computed(() => Math.max(10, ...reportData.value.map(d => Math.max(d.food || 0, d.waterMl || 0))));
+                const maxCounts = computed(() => Math.max(2, ...reportData.value.flatMap(d => [d.pee, d.poop, d.symptom])));
                 const reportY = (value, key) => 205 - (value / maxCounts.value) * 145;
                 const reportYWater = (value) => 205 - ((value || 0) / maxGrams.value) * 145;
-                const reportSegments = key => weekly.value.slice(1).map((d, i) => ({ a: weekly.value[i][key], b: d[key], i })).filter(p => p.a != null && p.b != null);
-                const reportWaterSegments = () => weekly.value.slice(1).map((d, i) => ({ a: weekly.value[i].waterMl, b: d.waterMl, i })).filter(p => p.a != null && p.b != null);
+                const reportSegments = key => reportData.value.slice(1).map((d, i) => ({ a: reportData.value[i][key], b: d[key], i })).filter(p => p.a != null && p.b != null);
+                const reportWaterSegments = () => reportData.value.slice(1).map((d, i) => ({ a: reportData.value[i].waterMl, b: d.waterMl, i })).filter(p => p.a != null && p.b != null);
 
                 const printReport = async () => {
                     if (!isOnline.value || !syncedAt.value) {
@@ -909,7 +913,7 @@
                 return {
                     APP_VERSION,
                     categories, weekly, todayHealth, recentNotes, selectServe, selectWaterServe, foodPreview, waterPreview, printReport,
-                    reportRows, countSeries, reportX, reportY, reportYWater, reportSegments, reportWaterSegments, maxGrams, maxCounts,
+                    reportDays, reportData, reportNotes, reportRows, countSeries, reportX, reportY, reportYWater, reportSegments, reportWaterSegments, maxGrams, maxCounts,
                     syncError, bannerNotice, bannerType, syncedAt, filterCategory, filteredLogs, activeServes, activeWaterServes,
                     openDiscardModal, openDiscardWaterModal, setNowToForm, round1,
                     logs, voiceLogs, currentTab, activeCategory, editingLogId, deletingLogId, form, todayStr,
@@ -1231,12 +1235,21 @@
         <div v-show="currentTab === 'bi'" class="space-y-5 no-print">
             <div class="flex items-center justify-between">
                 <div>
-                    <h2 class="text-sm font-bold text-slate-800">直近7日間の推移</h2>
+                    <h2 class="text-sm font-bold text-slate-800">直近{{ reportDays }}日間の推移</h2>
                     <p class="text-[11px] text-slate-400">日付・曜日ごとの摂取バランス</p>
                 </div>
+                <div class="flex flex-col items-end gap-2">
+                    <label class="text-xs text-slate-600">
+                        表示・PDFの期間
+                        <select v-model.number="reportDays" class="ml-1 rounded-lg border border-slate-200 bg-white px-2 py-1">
+                            <option :value="7">直近1週間</option>
+                            <option :value="14">直近2週間</option>
+                        </select>
+                    </label>
                 <button @click="printReport" :disabled="!isOnline" class="bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-xl px-3.5 py-2 shadow-sm transition flex items-center gap-1.5 disabled:opacity-40">
                     <i class="fa-solid fa-print"></i> PDFで保存 / 印刷
                 </button>
+                </div>
             </div>
 
             <!-- 週間グラフ -->
@@ -1294,10 +1307,10 @@
                 </p>
             </section>
 
-            <!-- 直近7日間の気付き・異変メモ -->
+            <!-- 直近{{ reportDays }}日間の気付き・異変メモ -->
             <section class="bg-white p-4 rounded-2xl border border-slate-100 shadow-sm">
                 <h3 class="text-xs font-bold text-slate-700 mb-2 flex items-center gap-1.5">
-                    <i class="fa-solid fa-notes-medical text-amber-600"></i> 直近7日間の気付き・異変メモ
+                    <i class="fa-solid fa-notes-medical text-amber-600"></i> 直近{{ reportDays }}日間の気付き・異変メモ
                 </h3>
                 <p v-if="!recentNotes.length" class="text-xs text-slate-400 py-3 text-center">記録はありません。</p>
                 <div v-for="log in recentNotes" :key="log.id" class="text-xs border-t border-slate-100 py-2.5 first:border-t-0">
@@ -1375,8 +1388,8 @@
         <!-- ================= A4横 通院レポート印刷領域（印刷時のみ表示） ================= -->
         <div class="print-only">
             <h2 style="font-size:18px;font-weight:bold;color:#78350f;">マックスの健康日記・通院用レポート ({{ APP_VERSION }})</h2>
-            <p style="font-size:10px;color:#64748b;margin-bottom:8px;">期間 {{ formatMMDDDay(weekly[0].date) }} ～ {{ formatMMDDDay(weekly[6].date) }} ／ データ取得日時 {{ syncedAt }}</p>
-            <svg viewBox="0 0 1160 520" style="width:100%;height:auto" role="img" aria-label="7日間の推移と日付軸を合わせた数値表">
+            <p style="font-size:10px;color:#64748b;margin-bottom:8px;">期間 {{ formatMMDDDay(reportData[0].date) }} ～ {{ formatMMDDDay(reportData[reportDays - 1].date) }} ／ データ取得日時 {{ syncedAt }}</p>
+            <svg viewBox="0 0 1160 520" style="width:100%;height:auto" role="img" :aria-label="reportDays + '日間の推移と日付軸を合わせた数値表'">
                 <text x="10" y="28" font-size="12">左軸：ごはん実食・水実飲水量 g</text>
                 <text x="1015" y="28" font-size="12">右軸：回数・件数 (折れ線)</text>
                 <g v-for="n in [0,1,2,3,4]">
@@ -1386,7 +1399,7 @@
                 </g>
                 
                 <!-- ごはん実食 積み上げ棒グラフ -->
-                <g v-for="(d, i) in weekly">
+                <g v-for="(d, i) in reportData">
                     <template v-if="d.food != null && d.food > 0">
                         <rect v-if="d.dry > 0" :x="reportX(i) - 14" :y="205 - (d.dry / maxGrams) * 145" width="28" :height="(d.dry / maxGrams) * 145" fill="#fdba74" rx="1"/>
                         <rect v-if="d.wet > 0" :x="reportX(i) - 14" :y="205 - ((d.dry + d.wet) / maxGrams) * 145" width="28" :height="(d.wet / maxGrams) * 145" fill="#c4b5fd" rx="1"/>
@@ -1397,7 +1410,7 @@
                 <!-- 水実飲水量 折れ線 -->
                 <g>
                     <line v-for="seg in reportWaterSegments()" :key="'water-seg-'+seg.i" :x1="reportX(seg.i)" :x2="reportX(seg.i+1)" :y1="reportYWater(seg.a)" :y2="reportYWater(seg.b)" stroke="#06b6d4" stroke-width="2" stroke-dasharray="4 3"/>
-                    <template v-for="(d,i) in weekly">
+                    <template v-for="(d,i) in reportData">
                         <circle v-if="d.waterMl != null" :key="'water-pt-'+i" :cx="reportX(i)" :cy="reportYWater(d.waterMl)" r="3.5" fill="#ffffff" stroke="#0891b2" stroke-width="2"/>
                     </template>
                 </g>
@@ -1405,27 +1418,27 @@
                 <!-- 折れ線グラフ（尿、便、異変） -->
                 <g v-for="s in countSeries" :key="'counts-'+s.key">
                     <line v-for="seg in reportSegments(s.key)" :key="s.key+seg.i" :x1="reportX(seg.i)" :x2="reportX(seg.i+1)" :y1="reportY(seg.a,s.key)" :y2="reportY(seg.b,s.key)" :stroke="s.color" stroke-width="2.5"/>
-                    <template v-for="(d,i) in weekly">
+                    <template v-for="(d,i) in reportData">
                         <circle v-if="d[s.key]!=null" :key="s.key+'-pt-'+i" :cx="reportX(i)" :cy="reportY(d[s.key],s.key)" r="3.5" fill="#ffffff" :stroke="s.color" stroke-width="2"/>
                     </template>
                 </g>
 
-                <g v-for="(d,i) in weekly" :key="'col-date-'+i">
+                <g v-for="(d,i) in reportData" :key="'col-date-'+i">
                     <line :x1="reportX(i)" :x2="reportX(i)" y1="50" y2="505" stroke="#cbd5e1" stroke-dasharray="2 4"/>
-                    <text :x="reportX(i)" y="231" text-anchor="middle" font-size="12" font-weight="bold">{{ formatMMDDDay(d.date) }}</text>
-                    <text :x="reportX(i)" y="250" text-anchor="middle" font-size="10">{{ d.fluid?'ⓞ 補液':'' }} {{ d.stimulant?'増進剤':'' }}</text>
+                    <text :x="reportX(i)" y="231" text-anchor="middle" :font-size="reportDays === 14 ? 10 : 12" font-weight="bold">{{ formatMMDDDay(d.date) }}</text>
+                    <text :x="reportX(i)" y="250" text-anchor="middle" :font-size="reportDays === 14 ? 7 : 10">{{ d.fluid?'ⓞ 補液':'' }} {{ d.stimulant?'増進剤':'' }}</text>
                 </g>
                 <g v-for="(s,row) in reportRows" :key="'report-row-'+s.key">
                     <rect x="0" :y="263+row*27" width="1135" height="27" :fill="row%2?'#f8fafc':'#fff'"/>
                     <text x="10" :y="281+row*27" :fill="s.color" font-size="11" font-weight="bold">{{ s.label }}</text>
-                    <text v-for="(d,i) in weekly" :key="s.key+i" :x="reportX(i)" :y="281+row*27" text-anchor="middle" font-size="11">{{ d[s.key]==null?'—':d[s.key] }}</text>
+                    <text v-for="(d,i) in reportData" :key="s.key+i" :x="reportX(i)" :y="281+row*27" text-anchor="middle" font-size="11">{{ d[s.key]==null?'—':d[s.key] }}</text>
                 </g>
             </svg>
             <p style="font-size:10px;color:#64748b;margin-top:6px;">—：計量記録なし。棒グラフは下からドライ（橙）・ウェット（紫）・その他（緑）の積み上げ、水実飲水量は青い点線折れ線です。</p>
             <div style="font-size:10px;margin-top:8px">
                 <strong>気付き・異変メモ</strong>
-                <p v-if="!recentNotes.length" style="color:#94a3b8">記録なし</p>
-                <p v-for="log in recentNotes.slice(0,5)" :key="log.id" style="white-space:pre-wrap;margin-top:2px;">{{ formatTime(log.timestamp) }} {{ log.details?.symptomType }} {{ (log.details?.description||'').slice(0,100) }}{{ (log.details?.description||'').length>100?'…':'' }}</p>
+                <p v-if="!reportNotes.length" style="color:#94a3b8">記録なし</p>
+                <p v-for="log in reportNotes.slice(0,5)" :key="log.id" style="white-space:pre-wrap;margin-top:2px;">{{ formatTime(log.timestamp) }} {{ log.details?.symptomType }} {{ (log.details?.description||'').slice(0,100) }}{{ (log.details?.description||'').length>100?'…':'' }}</p>
             </div>
         </div>
 
