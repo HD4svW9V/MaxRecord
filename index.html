@@ -687,13 +687,14 @@
 
                 const todayHealth = computed(() => daily(logs.value, localDate(clock.value)));
 
-                const weekly = computed(() => Array.from({ length: 7 }, (_, i) => {
+                const reportDays = ref(7);
+                const weekly = computed(() => Array.from({ length: reportDays.value }, (_, i) => {
                     const d = new Date(clock.value);
-                    d.setDate(d.getDate() - 6 + i);
+                    d.setDate(d.getDate() - (reportDays.value - 1) + i);
                     return daily(logs.value, localDate(d));
                 }));
 
-                const recentNotes = computed(() => logs.value.filter(l => ['notice', 'symptom'].includes(l.category) && l.timestamp?.slice(0, 10) >= weekly.value[0].date && l.timestamp?.slice(0, 10) <= weekly.value[6].date));
+                const recentNotes = computed(() => logs.value.filter(l => ['notice', 'symptom'].includes(l.category) && l.timestamp?.slice(0, 10) >= weekly.value[0].date && l.timestamp?.slice(0, 10) <= weekly.value[reportDays.value - 1].date));
 
                 const selectServe = () => {
                     const l = activeServes.value.find(l => l.id === form.value.food.targetServeLogId);
@@ -877,13 +878,8 @@
                     });
                 }, { deep: true });
 
-                const reportDays = ref(7);
-                const reportData = computed(() => Array.from({ length: reportDays.value }, (_, i) => {
-                    const d = new Date(clock.value);
-                    d.setDate(d.getDate() - (reportDays.value - 1) + i);
-                    return daily(logs.value, localDate(d));
-                }));
-                const reportNotes = computed(() => logs.value.filter(l => ['notice', 'symptom'].includes(l.category) && l.timestamp?.slice(0, 10) >= reportData.value[0].date && l.timestamp?.slice(0, 10) <= reportData.value[reportDays.value - 1].date));
+                const reportData = weekly;
+                const reportNotes = recentNotes;
 
                 const reportRows = computed(() => [
                     { key: 'food', label: 'ごはん合計 (g)', color: '#ea580c' },
@@ -1239,12 +1235,12 @@
         <div v-show="currentTab === 'bi'" class="space-y-5 no-print">
             <div class="flex items-center justify-between">
                 <div>
-                    <h2 class="text-sm font-bold text-slate-800">直近7日間の推移</h2>
+                    <h2 class="text-sm font-bold text-slate-800">直近{{ reportDays }}日間の推移</h2>
                     <p class="text-[11px] text-slate-400">日付・曜日ごとの摂取バランス</p>
                 </div>
                 <div class="flex flex-col items-end gap-2">
                     <label class="text-xs text-slate-600">
-                        PDFの期間
+                        表示・PDFの期間
                         <select v-model.number="reportDays" class="ml-1 rounded-lg border border-slate-200 bg-white px-2 py-1">
                             <option :value="7">直近1週間</option>
                             <option :value="14">直近2週間</option>
@@ -1311,10 +1307,10 @@
                 </p>
             </section>
 
-            <!-- 直近7日間の気付き・異変メモ -->
+            <!-- 直近{{ reportDays }}日間の気付き・異変メモ -->
             <section class="bg-white p-4 rounded-2xl border border-slate-100 shadow-sm">
                 <h3 class="text-xs font-bold text-slate-700 mb-2 flex items-center gap-1.5">
-                    <i class="fa-solid fa-notes-medical text-amber-600"></i> 直近7日間の気付き・異変メモ
+                    <i class="fa-solid fa-notes-medical text-amber-600"></i> 直近{{ reportDays }}日間の気付き・異変メモ
                 </h3>
                 <p v-if="!recentNotes.length" class="text-xs text-slate-400 py-3 text-center">記録はありません。</p>
                 <div v-for="log in recentNotes" :key="log.id" class="text-xs border-t border-slate-100 py-2.5 first:border-t-0">
