@@ -60,4 +60,3 @@ test('PDF includes older data and notes only in the selected period', () => {
     assert.equal(app.reportData.value.length, 7);
     assert.equal(app.reportNotes.value.length, 1);
 });
-
