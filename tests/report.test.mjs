@@ -35,11 +35,11 @@ test('PDF defaults to seven days and supports fourteen across year boundaries', 
     assert.equal(app.reportData.value[0].date, '2026-12-23');
     assert.equal(app.reportData.value.at(-1).date, '2027-01-05');
     assert.equal(app.reportX(13), 1030);
-    assert.equal(app.weekly.value.length, 7);
-    assert.equal(app.weekly.value[0].date, '2026-12-30');
+    assert.equal(app.weekly.value.length, 14);
+    assert.equal(app.weekly.value[0].date, '2026-12-23');
 });
 
-test('PDF includes older data and notes only in the selected period', () => {
+test('browser and PDF include the same selected data and notes', () => {
     const app = reportApp();
     app.logs.value = [
         { category: 'food', timestamp: '2026-12-23T09:00', details: { type: 'ドライ', dryAction: 'instant', eatenGrams: 50 } },
@@ -53,10 +53,12 @@ test('PDF includes older data and notes only in the selected period', () => {
     assert.equal(app.reportData.value[0].food, 50);
     assert.equal(app.maxGrams.value, 50);
     assert.equal(app.reportNotes.value.length, 2);
-    assert.equal(app.recentNotes.value.length, 1);
+    assert.equal(app.recentNotes.value.length, 2);
     assert.equal(app.reportSegments('pee').length, 13);
     assert.equal(app.reportWaterSegments().length, 0);
     app.reportDays.value = 7;
     assert.equal(app.reportData.value.length, 7);
     assert.equal(app.reportNotes.value.length, 1);
+    assert.equal(app.weekly.value.length, 7);
+    assert.equal(app.recentNotes.value.length, 1);
 });
