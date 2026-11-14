@@ -199,6 +199,8 @@
             const fluidLogs = dayLogs.filter(l => l.category === 'fluid');
             const hasFluid = fluidLogs.some(l => l.details?.hasFluid);
             const hasStimulant = fluidLogs.some(l => l.details?.hasAppetiteStimulant);
+            const kidneyMedicineCount = fluidLogs.filter(l => l.details?.hasKidneyMedicine).length;
+            const hasAntiemetic = fluidLogs.some(l => l.details?.hasAntiemetic);
 
             const symptomLogs = dayLogs.filter(l => l.category === 'symptom');
 
@@ -215,6 +217,8 @@
                 poop: poopCount,
                 fluid: hasFluid,
                 stimulant: hasStimulant,
+                kidneyMedicineCount,
+                antiemetic: hasAntiemetic,
                 symptom: symptomLogs.length
             };
         };
@@ -777,7 +781,8 @@
                             labels: weekly.value.map(d => {
                                 const dateWithDay = formatMMDDDay(d.date);
                                 const extra = `${d.fluid ? '補液 ' : ''}${d.stimulant ? '増進剤' : ''}`.trim();
-                                return extra ? [dateWithDay, extra] : dateWithDay;
+                                const medicines = [d.kidneyMedicineCount ? `腎臓薬${d.kidneyMedicineCount}回` : '', d.antiemetic ? '吐き気止め' : ''].filter(Boolean).join(' ');
+                                return extra || medicines ? [dateWithDay, ...[extra, medicines].filter(Boolean)] : dateWithDay;
                             }),
                             datasets: [
                                 {
@@ -1306,6 +1311,8 @@
                                 {{ formatMMDDDay(d.date) }}
                                 <span v-if="d.fluid" class="ml-1 text-[10px] bg-sky-100 text-sky-700 px-1 py-0.5 rounded font-bold">補</span>
                                 <span v-if="d.stimulant" class="ml-0.5 text-[10px] bg-emerald-100 text-emerald-700 px-1 py-0.5 rounded font-bold">薬</span>
+                                <span v-if="d.kidneyMedicineCount" class="ml-0.5 text-[10px] bg-emerald-100 text-emerald-700 px-1 py-0.5 rounded font-bold">腎臓薬{{ d.kidneyMedicineCount }}回</span>
+                                <span v-if="d.antiemetic" class="ml-0.5 text-[10px] bg-emerald-100 text-emerald-700 px-1 py-0.5 rounded font-bold">吐き気止め</span>
                             </td>
                             <td class="py-2.5 text-center font-bold text-slate-800">
                                 <template v-if="d.food != null">
@@ -1455,6 +1462,7 @@
                     <line :x1="reportX(i)" :x2="reportX(i)" y1="50" y2="505" stroke="#cbd5e1" stroke-dasharray="2 4"/>
                     <text :x="reportX(i)" y="231" text-anchor="middle" :font-size="reportDays === 14 ? 10 : 12" font-weight="bold">{{ formatMMDDDay(d.date) }}</text>
                     <text :x="reportX(i)" y="250" text-anchor="middle" :font-size="reportDays === 14 ? 7 : 10">{{ d.fluid?'ⓞ 補液':'' }} {{ d.stimulant?'増進剤':'' }}</text>
+                    <text :x="reportX(i)" y="260" text-anchor="middle" :font-size="reportDays === 14 ? 6 : 9">{{ d.kidneyMedicineCount ? `腎臓薬${d.kidneyMedicineCount}回` : '' }} {{ d.antiemetic ? '吐き気止め' : '' }}</text>
                 </g>
                 <g v-for="(s,row) in reportRows" :key="'report-row-'+s.key">
                     <rect x="0" :y="263+row*27" width="1135" height="27" :fill="row%2?'#f8fafc':'#fff'"/>
