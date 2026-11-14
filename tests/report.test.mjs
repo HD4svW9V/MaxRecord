@@ -9,13 +9,13 @@ function reportApp(subscriptions = [], watchers = []) {
         constructor(...args) { super(...(args.length ? args : ['2027-01-05T12:00:00'])); }
     }
     const context = {
-        Date: FixedDate, console, setInterval() {},
+        Date: FixedDate, console, setInterval() {}, setTimeout() {}, clearTimeout() {},
         ref: value => ({ value }), computed: fn => ({ get value() { return fn(); } }),
         watch: (sources, callback, options) => { if (options?.flush === 'sync') watchers.push(callback); }, nextTick: async () => {}, onMounted() {},
         createApp: options => ({ mount() { app = options.setup(); } }),
         initializeApp: () => ({}), getAuth: () => ({}), getFirestore: () => ({}),
         Chart: { register() {} }, ChartDataLabels: {},
-        collection: () => ({}), orderBy: () => ({}), limit: count => ({ count }),
+        doc: () => ({ id: 'test' }), runTransaction: async (db, fn) => fn({ set: (ref, data) => subscriptions.push(data) }), collection: () => ({}), orderBy: () => ({}), limit: count => ({ count }),
         query: (...args) => args.at(-1),
         onSnapshot: (q, options, callback, error) => {
             const sub = { q, options, callback, error, stopped: false };
@@ -126,3 +126,62 @@ test('empty history completes, errors keep printing disabled', () => {
     assert.equal(app.isOnline.value, false);
     assert.equal(app.syncedAt.value, '');
 });
+
+
+
+test('fluid defaults reset to 80 and old records retain their amounts', () => {
+    const app = reportApp();
+    assert.equal(app.form.value.fluid.fluidMl, 80);
+    app.openEditModal({id:'old',category:'fluid',details:{hasFluid:true,fluidMl:100}});
+    assert.equal(app.form.value.fluid.fluidMl, 100);
+    app.openEditModal({id:'legacy',category:'fluid',details:{hasFluid:true}});
+    assert.equal(app.form.value.fluid.fluidMl, 100);
+    assert.equal(app.form.value.fluid.hasKidneyMedicine, false);
+    app.openModal('fluid');
+    assert.equal(app.form.value.fluid.fluidMl, 80);
+});
+
+test('each new medicine saves by itself and empty selection is rejected', async () => {
+    for (const key of ['hasKidneyMedicine', 'hasAntiemetic']) {
+        const saved = [], app = reportApp(saved);
+        app.currentUser.value = {uid:'test'};
+        app.isOnline.value = true;
+        app.openModal('fluid');
+        app.form.value.fluid.hasFluid = false;
+        app.form.value.fluid[key] = true;
+        await app.saveLog();
+        assert.equal(saved.length, 1);
+        assert.equal(saved[0].details[key], true);
+        assert.equal(saved[0].details.fluidMl, '');
+        app.openEditModal({...saved[0],id:'saved'});
+        assert.equal(app.form.value.fluid[key], true);
+        app.openModal('fluid');
+        app.form.value.fluid.hasFluid = false;
+        await app.saveLog();
+        assert.equal(saved.length, 1);
+        assert.match(app.bannerNotice.value, /いずれかを入力/);
+    }
+});
+
+test('daily medicine marks count doses across both report periods', () => {
+    const app = reportApp();
+    app.logs.value = [
+        {category:'fluid',timestamp:'2027-01-05T08:00',details:{hasKidneyMedicine:true}},
+        {category:'fluid',timestamp:'2027-01-05T20:00',details:{hasKidneyMedicine:true,hasAntiemetic:true}},
+        {category:'fluid',timestamp:'2027-01-04T08:00',details:{hasKidneyMedicine:true}},
+        {category:'fluid',timestamp:'2026-12-23T08:00',details:{hasAntiemetic:true}},
+        {category:'fluid',timestamp:'2027-01-03T08:00',details:{hasFluid:true}}
+    ];
+    assert.equal(app.weekly.value.at(-1).kidneyMedicineCount, 2);
+    assert.equal(app.weekly.value.at(-1).antiemetic, true);
+    assert.equal(app.weekly.value.at(-2).kidneyMedicineCount, 1);
+    assert.equal(app.weekly.value.at(-2).antiemetic, false);
+    assert.equal(app.weekly.value.at(-3).kidneyMedicineCount, 0);
+    app.reportDays.value = 14;
+    assert.equal(app.weekly.value[0].antiemetic, true);
+    assert.equal(app.reportData.value.at(-1).kidneyMedicineCount, 2);
+    app.logs.value.splice(1,1);
+    assert.equal(app.reportData.value.at(-1).kidneyMedicineCount, 1);
+    assert.equal(app.reportData.value.at(-1).antiemetic, false);
+});
+
