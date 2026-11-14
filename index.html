@@ -271,7 +271,7 @@
                     food: { type: 'ドライ', dish: '', productName: '', note: '', dryAction: 'serve', serveGrams: '', discardGrams: '', grams: '', targetServeLogId: '' },
                     water: { waterAction: 'serve', dish: '', serveMl: '', discardMl: '', drunkMl: '', targetServeLogId: '', ml: '', note: '' },
                     toilet: { type: 'おしっこ', amount: '普通', note: '' },
-                    fluid: { hasFluid: true, fluidMl: 100, hasAppetiteStimulant: false, note: '' },
+                    fluid: { hasFluid: true, fluidMl: 80, hasAppetiteStimulant: false, hasKidneyMedicine: false, hasAntiemetic: false, note: '' },
                     notice: { description: '' },
                     symptom: { symptomType: '嘔吐（毛玉）', description: '' }
                 });
@@ -453,7 +453,7 @@
                     form.value.food = { type: 'ドライ', dish: '', productName: '', note: '', dryAction: 'serve', serveGrams: '', discardGrams: '', grams: '', targetServeLogId: '' };
                     form.value.water = { waterAction: 'serve', dish: '', serveMl: '', discardMl: '', drunkMl: '', targetServeLogId: '', ml: '', note: '' };
                     form.value.toilet = { type: 'おしっこ', amount: '普通', note: '' };
-                    form.value.fluid = { hasFluid: true, fluidMl: 100, hasAppetiteStimulant: false, note: '' };
+                    form.value.fluid = { hasFluid: true, fluidMl: 80, hasAppetiteStimulant: false, hasKidneyMedicine: false, hasAntiemetic: false, note: '' };
                     form.value.notice = { description: '' };
                     form.value.symptom = { symptomType: '嘔吐（毛玉）', description: '' };
                 };
@@ -503,7 +503,7 @@
                             note: log.details?.note || ''
                         };
                     } else if (log.category === 'fluid') {
-                        form.value.fluid = { ...log.details, fluidMl: log.details?.fluidMl ?? (log.details?.hasFluid ? 100 : '') };
+                        form.value.fluid = { hasKidneyMedicine: false, hasAntiemetic: false, ...log.details, fluidMl: log.details?.fluidMl ?? (log.details?.hasFluid ? 100 : '') };
                     } else if (log.category === 'notice') {
                         form.value.notice = { ...log.details };
                     } else if (log.category === 'symptom') {
@@ -571,11 +571,11 @@
 
                         if (category === 'food' && ['instant', 'discard'].includes(details.dryAction)) details.effectiveDate = timestamp.slice(0, 10);
                         if (category === 'water' && ['instant', 'discard'].includes(details.waterAction)) details.effectiveDate = timestamp.slice(0, 10);
-                        if (category === 'fluid' && details.hasFluid) details.fluidMl = grams(details.fluidMl ?? 100, '補液量');
+                        if (category === 'fluid' && details.hasFluid) details.fluidMl = grams(details.fluidMl ?? 80, '補液量');
                         if (category === 'fluid' && !details.hasFluid) details.fluidMl = '';
                         // 補液等のバリデーション文言を「備考」に更新
-                        if (category === 'fluid' && !details.hasFluid && !details.hasAppetiteStimulant && !details.note?.trim()) {
-                            throw new Error('補液・食欲増進剤・備考のいずれかを入力してください。');
+                        if (category === 'fluid' && !details.hasFluid && !details.hasAppetiteStimulant && !details.hasKidneyMedicine && !details.hasAntiemetic && !details.note?.trim()) {
+                            throw new Error('補液・食欲増進剤・腎臓薬・吐き気止め・備考のいずれかを入力してください。');
                         }
                         if (category === 'notice' && !details.description?.trim()) throw new Error('気付きメモを入力してください。');
 
@@ -697,7 +697,7 @@
                     { id: 'food', label: 'ごはん', icon: '🍚', hint: '器ごと計量（ドライ・ウェット・その他）', color: '#fed7aa' },
                     { id: 'water', label: '水', icon: '💧', hint: '器ごと計量（実飲水量を差分で算出）', color: '#a5f3fc' },
                     { id: 'toilet', label: 'トイレ', icon: '🚽', hint: '尿・便', color: '#fde68a' },
-                    { id: 'fluid', label: '補液等', icon: '💉', hint: '皮下輸液・食欲増進剤', color: '#bae6fd' },
+                    { id: 'fluid', label: '補液等', icon: '💉', hint: '皮下輸液・食欲増進剤・腎臓薬・吐き気止め', color: '#bae6fd' },
                     { id: 'symptom', label: '異変', icon: '⚠️', hint: '嘔吐（ごはん・毛玉・胃液等）', color: '#fecdd3' },
                     { id: 'notice', label: '気付きメモ', icon: '💡', hint: '日々の様子・ご機嫌・自由記述', color: '#fde68a' }
                 ];
@@ -1215,6 +1215,8 @@
                                 <p class="font-bold text-sky-700">
                                     {{ log.details?.hasFluid ? `💉 補液 ${log.details?.fluidMl ?? 100}ml` : '' }}
                                     {{ log.details?.hasAppetiteStimulant ? '💊 食欲増進剤あり' : '' }}
+                                    {{ log.details?.hasKidneyMedicine ? '💊 腎臓薬あり' : '' }}
+                                    {{ log.details?.hasAntiemetic ? '💊 吐き気止めあり' : '' }}
                                 </p>
                                 <p v-if="log.details?.note" class="text-slate-500">「{{ log.details?.note }}」</p>
                             </div>
@@ -1712,11 +1714,19 @@
                         <div v-if="form.fluid.hasFluid">
                             <label class="block text-xs font-bold text-slate-600 mb-1">補液量（ml）</label>
                             <input type="number" inputmode="decimal" min="0" step="1" v-model="form.fluid.fluidMl" class="w-full text-xs p-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-400">
-                            <p class="text-[10px] text-slate-400 mt-1">既定値は100mlです</p>
+                            <p class="text-[10px] text-slate-400 mt-1">既定値は80mlです</p>
                         </div>
                         <label class="flex justify-between items-center p-3.5 bg-emerald-50 rounded-2xl text-xs font-bold text-emerald-900 border border-emerald-100">
                             <span>💊 食欲増進剤</span>
                             <input type="checkbox" v-model="form.fluid.hasAppetiteStimulant" class="w-4 h-4 text-emerald-600 rounded">
+                        </label>
+                        <label class="flex justify-between items-center p-3.5 bg-emerald-50 rounded-2xl text-xs font-bold text-emerald-900 border border-emerald-100">
+                            <span>💊 腎臓薬</span>
+                            <input type="checkbox" v-model="form.fluid.hasKidneyMedicine" class="w-4 h-4 text-emerald-600 rounded">
+                        </label>
+                        <label class="flex justify-between items-center p-3.5 bg-emerald-50 rounded-2xl text-xs font-bold text-emerald-900 border border-emerald-100">
+                            <span>💊 吐き気止め</span>
+                            <input type="checkbox" v-model="form.fluid.hasAntiemetic" class="w-4 h-4 text-emerald-600 rounded">
                         </label>
                         <div>
                             <label class="block text-xs font-bold text-slate-600 mb-1">備考</label>
